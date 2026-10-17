@@ -49,6 +49,7 @@ jobs:
             adb install -r app/build/outputs/apk/debug/app-debug.apk
             adb install -r probe/build/outputs/apk/debug/probe-debug.apk
             gradle --no-daemon connectedDebugAndroidTest
+            adb install -r app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -n com.kozzzak.simplefirewall/.MainActivity
             sleep 2
             mkdir -p app/build/ui
