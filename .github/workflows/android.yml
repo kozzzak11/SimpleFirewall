@@ -53,7 +53,7 @@ jobs:
             adb shell am start -n com.kozzzak.simplefirewall/.MainActivity
             sleep 2
             mkdir -p app/build/ui
-            adb exec-out screencap -p > app/build/ui/screenshot.png
+            python3 ci/capture-ui.py
       - name: Prepare APK
         run: cp app/build/outputs/apk/debug/app-debug.apk SimpleFirewall.apk
       - uses: actions/upload-artifact@v4
@@ -75,7 +75,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view v1.0.0 >/dev/null 2>&1 || gh release create v1.0.0 --target "$GITHUB_SHA" --title 'SimpleFirewall 1.0.0' --notes 'Personal Android firewall. One Internet allowlist for Wi-Fi and mobile data. APK built and network-tested on Android 15 emulator. Development signing certificate.'
-          gh release upload v1.0.0 SimpleFirewall.apk --clobber
+          gh release view v1.1.0 >/dev/null 2>&1 || gh release create v1.1.0 --target "$GITHUB_SHA" --title 'SimpleFirewall 1.1.0' --notes 'Two bottom tabs: Firewall controls and full-height application allowlist. APK built and network-tested on Android 15 emulator. Development signing certificate.'
+          gh release upload v1.1.0 SimpleFirewall.apk --clobber
     permissions:
       contents: write

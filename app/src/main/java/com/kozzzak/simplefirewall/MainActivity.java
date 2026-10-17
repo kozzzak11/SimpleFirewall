@@ -22,7 +22,11 @@ public class MainActivity extends Activity {
     private final ArrayList<AppGroup> all = new ArrayList<>(), visible = new ArrayList<>();
     private Set<String> allowed;
     private Switch power;
-    private TextView status, count;
+    private TextView status, count, allowedSummary;
+    private FrameLayout pages;
+    private View firewallPage, appsPage;
+    private Button firewallTab, appsTab;
+    private int currentTab;
     private EditText search;
     private CheckBox system;
     private AppAdapter adapter;
@@ -36,35 +40,33 @@ public class MainActivity extends Activity {
         allowed = Rules.allowed(this);
         LinearLayout root = column();
         root.setBackgroundColor(BG);
-        root.setPadding(dp(22), dp(12), dp(22), 0);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
-            v.setPadding(dp(22), dp(12) + insets.getSystemWindowInsetTop(), dp(22), insets.getSystemWindowInsetBottom());
+            v.setPadding(0, insets.getSystemWindowInsetTop(), 0, insets.getSystemWindowInsetBottom());
             return insets.consumeSystemWindowInsets();
         });
         setContentView(root);
-        TextView brand = text("SIMPLE / FIREWALL", 12, ACCENT);
-        brand.setLetterSpacing(.18f); root.addView(brand);
-        TextView title = text("Твой интернет.\nТвои правила.", 30, WHITE);
-        title.setTypeface(null, Typeface.BOLD); title.setPadding(0, dp(16), 0, dp(20)); root.addView(title);
+        pages = new FrameLayout(this);
+        firewallPage = buildFirewallPage();
+        appsPage = buildAppsPage();
+        pages.addView(firewallPage, new FrameLayout.LayoutParams(-1, -1));
+        pages.addView(appsPage, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(pages, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        LinearLayout card = column(); card.setPadding(dp(18), dp(15), dp(18), dp(15)); card.setBackground(round(CARD, 20));
-        power = new Switch(this); power.setText("Firewall"); power.setTextSize(21); power.setTextColor(WHITE); power.setSwitchPadding(dp(16));
-        power.setTypeface(null, Typeface.BOLD); card.addView(power, new LinearLayout.LayoutParams(-1, dp(45)));
-        status = text("Выключен", 14, MUTED); status.setPadding(0, dp(4), 0, 0); card.addView(status); root.addView(card);
-        TextView intro = text("Интернет только у отмеченных приложений.\nОдни правила для Wi‑Fi и мобильной сети.", 14, MUTED);
-        intro.setPadding(0, dp(16), 0, dp(12)); root.addView(intro);
-        search = new EditText(this); search.setSingleLine(true); search.setTextSize(15); search.setTextColor(WHITE);
-        search.setHintTextColor(MUTED); search.setHint("Поиск приложений");
-        search.setPadding(dp(15), 0, dp(15), 0); search.setBackground(round(CARD, 12));
-        root.addView(search, new LinearLayout.LayoutParams(-1, dp(48)));
-        LinearLayout toolbar = new LinearLayout(this); toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        count = text("Загрузка…", 13, MUTED); toolbar.addView(count, new LinearLayout.LayoutParams(0, dp(50), 1)); count.setGravity(Gravity.CENTER_VERTICAL);
-        system = new CheckBox(this); system.setText("Системные"); system.setTextColor(MUTED); system.setTextSize(13); toolbar.addView(system); root.addView(toolbar);
-        ListView list = new ListView(this); list.setDividerHeight(dp(7)); list.setDivider(null);
-        list.setCacheColorHint(BG); adapter = new AppAdapter(); list.setAdapter(adapter);
-        root.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
-        TextView help = text("Как это работает", 13, MUTED); help.setGravity(Gravity.CENTER); help.setPadding(0, dp(12), 0, dp(12));
-        root.addView(help, new LinearLayout.LayoutParams(-1, -2)); help.setOnClickListener(v -> showHelp());
+        View divider = new View(this); divider.setBackgroundColor(CARD);
+        root.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setPadding(dp(12), dp(6), dp(12), dp(6));
+        firewallTab = navButton("Firewall", R.drawable.ic_shield, 0);
+        appsTab = navButton("Приложения", R.drawable.ic_apps, 1);
+        navigation.addView(firewallTab, new LinearLayout.LayoutParams(0, dp(64), 1));
+        LinearLayout.LayoutParams appsNavParams = new LinearLayout.LayoutParams(0, dp(64), 1);
+        appsNavParams.leftMargin = dp(8); navigation.addView(appsTab, appsNavParams);
+        root.addView(navigation);
+        if (state != null) {
+            search.setText(state.getString("query", ""));
+            system.setChecked(state.getBoolean("system", false));
+        }
+        selectTab(state != null ? state.getInt("tab", 0) : Rules.prefs(this).getInt("tab", 0));
         power.setOnCheckedChangeListener((button, checked) -> { if (!binding) { if (checked) requestStart(); else stopFirewall(); } });
         system.setOnCheckedChangeListener((v, checked) -> filter());
         search.addTextChangedListener(new TextWatcher() {
@@ -74,6 +76,82 @@ public class MainActivity extends Activity {
         });
         registerUpdates();
         updateStatus();
+    }
+
+    private View buildFirewallPage() {
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
+        LinearLayout page = column(); page.setPadding(dp(22), dp(22), dp(22), dp(16));
+        scroll.addView(page);
+        TextView brand = text("SIMPLE / FIREWALL", 12, ACCENT);
+        brand.setLetterSpacing(.18f); page.addView(brand);
+        TextView title = text("Твой интернет.\nТвои правила.", 30, WHITE);
+        title.setTypeface(null, Typeface.BOLD); title.setPadding(0, dp(20), 0, dp(24)); page.addView(title);
+        LinearLayout card = column(); card.setPadding(dp(18), dp(15), dp(18), dp(18)); card.setBackground(round(CARD, 20));
+        power = new Switch(this); power.setText("Firewall"); power.setTextSize(21); power.setTextColor(WHITE); power.setSwitchPadding(dp(16));
+        power.setTypeface(null, Typeface.BOLD); card.addView(power, new LinearLayout.LayoutParams(-1, dp(48)));
+        status = text("Выключен", 14, MUTED); status.setPadding(0, dp(8), 0, 0); card.addView(status); page.addView(card);
+        TextView intro = text("Интернет только у выбранных приложений.\nОдни правила для Wi‑Fi и мобильной сети.", 15, MUTED);
+        intro.setPadding(0, dp(20), 0, dp(24)); page.addView(intro);
+        allowedSummary = text("Разрешено приложений: 0", 16, WHITE); page.addView(allowedSummary);
+        Button choose = new Button(this); choose.setText("Выбрать приложения  →"); choose.setAllCaps(false); choose.setTextSize(16);
+        choose.setTextColor(BG); choose.setBackground(round(ACCENT, 14));
+        LinearLayout.LayoutParams chooseParams = new LinearLayout.LayoutParams(-1, dp(52)); chooseParams.topMargin = dp(14);
+        page.addView(choose, chooseParams); choose.setOnClickListener(v -> selectTab(1));
+        TextView help = text("Как это работает", 14, MUTED); help.setGravity(Gravity.CENTER); help.setPadding(0, dp(24), 0, dp(16));
+        page.addView(help, new LinearLayout.LayoutParams(-1, -2)); help.setOnClickListener(v -> showHelp());
+        return scroll;
+    }
+
+    private View buildAppsPage() {
+        LinearLayout page = column(); page.setPadding(dp(16), dp(14), dp(16), 0);
+        TextView title = text("Приложения", 24, WHITE); title.setTypeface(null, Typeface.BOLD); page.addView(title);
+        TextView subtitle = text("Отметь приложения с доступом в интернет", 13, MUTED);
+        subtitle.setPadding(0, dp(4), 0, dp(12)); page.addView(subtitle);
+        search = new EditText(this); search.setSingleLine(true); search.setTextSize(15); search.setTextColor(WHITE);
+        search.setHintTextColor(MUTED); search.setHint("Поиск приложений");
+        search.setPadding(dp(14), 0, dp(14), 0); search.setBackground(round(CARD, 12));
+        page.addView(search, new LinearLayout.LayoutParams(-1, dp(44)));
+        LinearLayout toolbar = new LinearLayout(this); toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        count = text("Загрузка…", 13, MUTED); count.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.addView(count, new LinearLayout.LayoutParams(0, dp(42), 1));
+        system = new CheckBox(this); system.setText("Системные"); system.setTextColor(MUTED); system.setTextSize(13);
+        toolbar.addView(system); page.addView(toolbar);
+        ListView list = new ListView(this); list.setDivider(null); list.setDividerHeight(dp(5));
+        list.setCacheColorHint(BG); adapter = new AppAdapter(); list.setAdapter(adapter);
+        page.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
+        return page;
+    }
+
+    private Button navButton(String label, int icon, int tab) {
+        Button button = new Button(this); button.setText(label); button.setAllCaps(false); button.setTextSize(13);
+        button.setPadding(dp(8), dp(7), dp(8), dp(5)); button.setMinHeight(0); button.setMinimumHeight(0);
+        android.graphics.drawable.Drawable drawable = getDrawable(icon).mutate();
+        drawable.setBounds(0, 0, dp(22), dp(22));
+        button.setCompoundDrawables(null, drawable, null, null); button.setCompoundDrawablePadding(dp(3));
+        button.setContentDescription("Вкладка " + label);
+        button.setOnClickListener(v -> selectTab(tab)); return button;
+    }
+
+    private void selectTab(int tab) {
+        currentTab = tab == 1 ? 1 : 0;
+        firewallPage.setVisibility(currentTab == 0 ? View.VISIBLE : View.GONE);
+        appsPage.setVisibility(currentTab == 1 ? View.VISIBLE : View.GONE);
+        styleTab(firewallTab, currentTab == 0); styleTab(appsTab, currentTab == 1);
+        Rules.prefs(this).edit().putInt("tab", currentTab).apply();
+        if (currentTab == 0) {
+            search.clearFocus();
+            android.view.inputmethod.InputMethodManager keyboard = getSystemService(android.view.inputmethod.InputMethodManager.class);
+            keyboard.hideSoftInputFromWindow(search.getWindowToken(), 0);
+        }
+    }
+    private void styleTab(Button tab, boolean selected) {
+        tab.setSelected(selected); tab.setTextColor(selected ? ACCENT : MUTED);
+        tab.setBackground(round(selected ? CARD : Color.TRANSPARENT, 14));
+        tab.getCompoundDrawables()[1].setTint(selected ? ACCENT : MUTED);
+    }
+    @Override protected void onSaveInstanceState(Bundle state) {
+        state.putInt("tab", currentTab); state.putString("query", search.getText().toString());
+        state.putBoolean("system", system.isChecked()); super.onSaveInstanceState(state);
     }
 
     @android.annotation.SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -161,7 +239,8 @@ public class MainActivity extends Activity {
             boolean selected = selected(g); if (selected) n++;
             if ((system.isChecked() || g.user || selected || !q.isEmpty()) && (g.label + " " + g.details).toLowerCase(Locale.ROOT).contains(q)) visible.add(g);
         }
-        count.setText("Разрешено: " + n); adapter.notifyDataSetChanged();
+        count.setText("Разрешено: " + n);
+        allowedSummary.setText("Разрешено приложений: " + n); adapter.notifyDataSetChanged();
     }
 
     private void toggle(AppGroup g, boolean checked) {
@@ -188,7 +267,7 @@ public class MainActivity extends Activity {
             Row row;
             if (recycled == null) {
                 row = new Row(); LinearLayout box = new LinearLayout(MainActivity.this); box.setGravity(Gravity.CENTER_VERTICAL);
-                box.setPadding(dp(12), dp(13), dp(10), dp(13)); box.setBackground(round(CARD, 14));
+                box.setPadding(dp(10), dp(9), dp(8), dp(9)); box.setBackground(round(CARD, 14));
                 row.icon = new ImageView(MainActivity.this); box.addView(row.icon, new LinearLayout.LayoutParams(dp(36), dp(36)));
                 LinearLayout labels = column(); labels.setPadding(dp(12), 0, dp(8), 0);
                 row.title = text("", 15, WHITE); row.title.setMaxLines(2); row.title.setEllipsize(TextUtils.TruncateAt.END); labels.addView(row.title);
