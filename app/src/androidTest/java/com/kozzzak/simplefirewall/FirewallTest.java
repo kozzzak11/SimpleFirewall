@@ -104,6 +104,10 @@ public class FirewallTest {
         Rules.enabled(context, false);
         instrumentation.runOnMainSync(() -> context.startService(new Intent(context, FirewallService.class).setAction(FirewallService.STOP)));
         instrumentation.waitForIdleSync();
+        // startService dispatches asynchronously; the UI-thread idle barrier
+        // can precede delivery of the service command from system_server.
+        long stoppedBy = System.currentTimeMillis() + 6000;
+        while (FirewallService.running && System.currentTimeMillis() < stoppedBy) Thread.sleep(50);
         assertFalse("Firewall still reports active after STOP", FirewallService.running);
         expectReachable();
     }
