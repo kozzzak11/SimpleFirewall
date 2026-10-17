@@ -20,6 +20,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
@@ -42,7 +45,12 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: gradle --no-daemon connectedDebugAndroidTest
+          script: |
+            gradle --no-daemon connectedDebugAndroidTest
+            adb shell am start -n com.kozzzak.simplefirewall/.MainActivity
+            sleep 2
+            mkdir -p app/build/ui
+            adb exec-out screencap -p > app/build/ui/screenshot.png
       - name: Prepare APK
         run: cp app/build/outputs/apk/debug/app-debug.apk SimpleFirewall.apk
       - uses: actions/upload-artifact@v4
@@ -58,6 +66,7 @@ jobs:
           path: |
             app/build/reports/
             app/build/outputs/androidTest-results/
+            app/build/ui/
       - name: Publish APK download
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
