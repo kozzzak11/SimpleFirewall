@@ -1,0 +1,69 @@
+name: Build and test APK
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Compile and lint
+        run: gradle --no-daemon assembleDebug lintDebug assembleDebugAndroidTest
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Start local network probe
+        run: |
+          mkdir -p /tmp/sf-probe
+          echo sf-ok > /tmp/sf-probe/probe.txt
+          python3 -m http.server 8787 --bind 0.0.0.0 --directory /tmp/sf-probe > /tmp/sf-probe.log 2>&1 &
+      - name: Verify firewall on Android 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: gradle --no-daemon connectedDebugAndroidTest
+      - name: Prepare APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk SimpleFirewall.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SimpleFirewall-APK
+          path: SimpleFirewall.apk
+          retention-days: 90
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-reports
+          path: |
+            app/build/reports/
+            app/build/outputs/androidTest-results/
+      - name: Publish APK download
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v1.0.0 >/dev/null 2>&1 || gh release create v1.0.0 --target "$GITHUB_SHA" --title 'SimpleFirewall 1.0.0' --notes 'Personal Android firewall. One Internet allowlist for Wi-Fi and mobile data. APK built and network-tested on Android 15 emulator. Development signing certificate.'
+          gh release upload v1.0.0 SimpleFirewall.apk --clobber
+    permissions:
+      contents: write
