@@ -72,7 +72,7 @@ public class FirewallTest {
     @After public void cleanup() {
         context.getSystemService(ConnectivityManager.class).bindProcessToNetwork(null);
         Rules.enabled(context, false);
-        context.stopService(new Intent(context, FirewallService.class));
+        context.startService(new Intent(context, FirewallService.class).setAction(FirewallService.STOP));
         Rules.save(context, Collections.emptySet());
     }
 
@@ -102,8 +102,9 @@ public class FirewallTest {
         setRules(Collections.emptySet());
         assertFalse("Revoked app still has Internet", connects());
         Rules.enabled(context, false);
-        instrumentation.runOnMainSync(() -> context.stopService(new Intent(context, FirewallService.class)));
+        instrumentation.runOnMainSync(() -> context.startService(new Intent(context, FirewallService.class).setAction(FirewallService.STOP)));
         instrumentation.waitForIdleSync();
+        assertFalse("Firewall still reports active after STOP", FirewallService.running);
         expectReachable();
     }
 }

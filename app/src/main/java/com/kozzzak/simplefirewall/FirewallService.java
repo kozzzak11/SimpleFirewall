@@ -44,8 +44,8 @@ public class FirewallService extends VpnService {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if ((intent != null && STOP.equals(intent.getAction())) || !Rules.enabled(this)) {
-            Rules.enabled(this, false);
-            stopSelf();
+            error = "";
+            shutdown();
             return START_NOT_STICKY;
         }
         startForeground(1, notification());
@@ -103,22 +103,33 @@ public class FirewallService extends VpnService {
 
     private void fail(String message) {
         error = message;
+        shutdown();
+    }
+    private void closeTunnel() {
+        if (tunnel != null) try { tunnel.close(); } catch (IOException ignored) {}
+        tunnel = null;
+        running = false;
+    }
+    private void shutdown() {
         Rules.enabled(this, false);
+        // The system is bound to VpnService while the TUN exists. stopSelf()
+        // alone does not trigger onDestroy, so close the connection explicitly.
+        closeTunnel();
+        stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
         changed();
     }
     private void changed() { sendBroadcast(new Intent(STATUS).setPackage(getPackageName())); }
 
     @Override public void onRevoke() {
-        Rules.enabled(this, false);
-        error = "Firewall отключён системой или другим VPN.";
-        stopSelf();
+        new android.os.Handler(getMainLooper()).post(() -> {
+            error = "Firewall отключён системой или другим VPN.";
+            shutdown();
+        });
     }
     @Override public void onDestroy() {
         if (registered) unregisterReceiver(packages);
-        if (tunnel != null) try { tunnel.close(); } catch (IOException ignored) {}
-        tunnel = null;
-        running = false;
+        closeTunnel();
         stopForeground(STOP_FOREGROUND_REMOVE);
         changed();
         super.onDestroy();

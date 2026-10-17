@@ -84,7 +84,15 @@ public class MainActivity extends Activity {
         else registerReceiver(updates, new IntentFilter(FirewallService.STATUS), "com.kozzzak.simplefirewall.INTERNAL", null);
     }
 
-    @Override protected void onResume() { super.onResume(); allowed = Rules.allowed(this); updateStatus(); loadApps(); }
+    @Override protected void onResume() {
+        super.onResume();
+        allowed = Rules.allowed(this);
+        if (Rules.enabled(this) && !FirewallService.running) {
+            if (VpnService.prepare(this) == null) startFirewall();
+            else Rules.enabled(this, false);
+        }
+        updateStatus(); loadApps();
+    }
 
     private void requestStart() {
         Intent consent = VpnService.prepare(this);
@@ -106,7 +114,7 @@ public class MainActivity extends Activity {
     }
     private void stopFirewall() {
         Rules.enabled(this, false); FirewallService.error = "";
-        stopService(new Intent(this, FirewallService.class)); updateStatus();
+        startService(new Intent(this, FirewallService.class).setAction(FirewallService.STOP)); updateStatus();
     }
     private void updateStatus() {
         binding = true;
@@ -168,7 +176,7 @@ public class MainActivity extends Activity {
 
     private void showHelp() {
         new AlertDialog.Builder(this).setTitle("SimpleFirewall")
-            .setMessage("Отметьте приложения и включите firewall. Новые приложения по умолчанию заблокированы. Настройки сохраняются.\n\nРаботает локально через VPN Android, без серверов, рекламы и сбора данных. Другой VPN одновременно использовать нельзя.\n\nСистемные приложения доступны по галочке «Системные». У приложений с общим UID доступ общий — они объединены в одну строку. Для push-уведомлений могут понадобиться сервисы Google.\n\nФильтруется трафик приложений текущего профиля, IPv4 и IPv6. Раздача интернета и другие профили не фильтруются.\n\nЕсли Android остановит службу, блокировка прекратится. Режим «Блокировать соединения без VPN» с этой версией несовместим: выбранные приложения выходят в интернет напрямую.\n\nПосле перезагрузки телефона включите firewall вручную.")
+            .setMessage("Отметьте приложения и включите firewall. Новые приложения по умолчанию заблокированы. Настройки сохраняются.\n\nРаботает локально через VPN Android, без серверов, рекламы и сбора данных. Другой VPN одновременно использовать нельзя.\n\nСистемные приложения доступны по галочке «Системные». У приложений с общим UID доступ общий — они объединены в одну строку. Для push-уведомлений могут понадобиться сервисы Google.\n\nФильтруется трафик приложений текущего профиля, IPv4 и IPv6. Раздача интернета и другие профили не фильтруются.\n\nЕсли Android остановит службу, блокировка прекратится. Режим «Блокировать соединения без VPN» с этой версией несовместим: выбранные приложения выходят в интернет напрямую.\n\nПосле перезагрузки телефона откройте приложение для возобновления работы.")
             .setPositiveButton("Понятно", null).show();
     }
 
