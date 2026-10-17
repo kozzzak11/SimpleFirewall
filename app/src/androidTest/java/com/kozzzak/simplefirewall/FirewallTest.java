@@ -66,6 +66,17 @@ public class FirewallTest {
         for (int i = 0; i < 5; i++) { if (connects()) return; Thread.sleep(100); }
         fail("Allowed app cannot reach local test server");
     }
+    private void expectBlocked(String message) {
+        // ConnectivityService installs the new agent's UID routes asynchronously
+        // after establish() returns. Check eventual application within a bound,
+        // then verify a second fresh connection remains blocked.
+        long deadline = System.currentTimeMillis() + 6000;
+        boolean reachable;
+        do { reachable = connects(); }
+        while (reachable && System.currentTimeMillis() < deadline);
+        assertFalse(message, reachable);
+        assertFalse("Blocking policy did not remain active", connects());
+    }
 
     @Before public void prepare() throws Exception {
         command("appops set " + context.getPackageName() + " ACTIVATE_VPN allow");
@@ -81,7 +92,7 @@ public class FirewallTest {
 
     @Test public void defaultDenyAllowThenRevoke() throws Exception {
         setRules(Collections.emptySet());
-        assertFalse("Unselected app leaked IPv4 traffic", connects());
+        expectBlocked("Unselected app still has IPv4 access after policy application");
 
         ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
         boolean v4 = false, v6 = false;
@@ -103,7 +114,7 @@ public class FirewallTest {
         setRules(Collections.singleton(PROBE));
         expectReachable();
         setRules(Collections.emptySet());
-        assertFalse("Revoked app still has Internet", connects());
+        expectBlocked("Revoked app still has Internet after policy application");
         Rules.enabled(context, false);
         instrumentation.runOnMainSync(() -> context.startService(new Intent(context, FirewallService.class).setAction(FirewallService.STOP)));
         instrumentation.waitForIdleSync();
