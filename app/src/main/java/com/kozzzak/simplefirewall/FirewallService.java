@@ -13,6 +13,7 @@ public class FirewallService extends VpnService {
     static final String STOP = "com.kozzzak.simplefirewall.STOP";
     static final String STATUS = "com.kozzzak.simplefirewall.STATUS";
     static volatile boolean running;
+    static volatile long appliedGeneration;
     static volatile String error = "";
     private ParcelFileDescriptor tunnel;
     private boolean registered;
@@ -90,6 +91,7 @@ public class FirewallService extends VpnService {
             // Retain the TUN descriptor without forwarding or polling packets.
             // No remote endpoints, packet logging, wakelocks or userspace TCP stack.
             running = true;
+            appliedGeneration++;
             error = "";
             changed();
         } catch (Exception e) {

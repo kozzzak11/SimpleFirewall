@@ -29,12 +29,15 @@ public class FirewallTest {
         }
     }
     private void setRules(java.util.Set<String> packages) throws Exception {
+        long previous = FirewallService.appliedGeneration;
         Rules.save(context, packages); Rules.enabled(context, true);
         instrumentation.runOnMainSync(() -> context.startForegroundService(new Intent(context, FirewallService.class)));
         instrumentation.waitForIdleSync();
         long end = System.currentTimeMillis() + 6000;
-        while (!FirewallService.running && System.currentTimeMillis() < end) Thread.sleep(50);
+        while ((!FirewallService.running || FirewallService.appliedGeneration <= previous)
+            && System.currentTimeMillis() < end) Thread.sleep(50);
         assertTrue(FirewallService.error, FirewallService.running);
+        assertTrue("New rules were not acknowledged", FirewallService.appliedGeneration > previous);
     }
     private boolean connects() { return connects(false); }
     private boolean connects(boolean bind) {
