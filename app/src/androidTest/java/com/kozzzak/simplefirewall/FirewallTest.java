@@ -11,10 +11,14 @@ import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class FirewallTest {
+    private static final String PROBE = "com.kozzzak.simplefirewall.probe";
     private final android.app.Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
     private final Context context = instrumentation.getTargetContext();
 
@@ -32,16 +36,28 @@ public class FirewallTest {
         while (!FirewallService.running && System.currentTimeMillis() < end) Thread.sleep(50);
         assertTrue(FirewallService.error, FirewallService.running);
     }
-    private boolean connects() {
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress("10.0.2.2", 8787), 1200);
-            socket.setSoTimeout(1200);
-            socket.getOutputStream().write("GET /probe.txt HTTP/1.0\r\nHost: localhost\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
-            ByteArrayOutputStream body = new ByteArrayOutputStream();
-            byte[] buf = new byte[1024]; int n;
-            while ((n = socket.getInputStream().read(buf)) != -1) body.write(buf, 0, n);
-            return body.toString("UTF-8").contains("sf-ok");
-        } catch (IOException e) { return false; }
+    private boolean connects() { return connects(false); }
+    private boolean connects(boolean bind) {
+        String request = java.util.UUID.randomUUID().toString();
+        CountDownLatch reply = new CountDownLatch(1);
+        AtomicBoolean reachable = new AtomicBoolean();
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                if (request.equals(i.getStringExtra("request"))) {
+                    reachable.set(i.getBooleanExtra("reachable", false)); reply.countDown();
+                }
+            }
+        };
+        context.registerReceiver(receiver, new IntentFilter("com.kozzzak.simplefirewall.PROBE_RESULT"),
+            "com.kozzzak.simplefirewall.INTERNAL", null, Context.RECEIVER_EXPORTED);
+        try {
+            context.sendBroadcast(new Intent().setComponent(new ComponentName(PROBE, PROBE + ".ProbeReceiver"))
+                .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                .putExtra("request", request).putExtra("bind", bind));
+            assertTrue("Separate probe app did not reply", reply.await(8, TimeUnit.SECONDS));
+            return reachable.get();
+        } catch (InterruptedException e) { throw new AssertionError(e); }
+        finally { context.unregisterReceiver(receiver); }
     }
     private void expectReachable() throws Exception {
         for (int i = 0; i < 5; i++) { if (connects()) return; Thread.sleep(100); }
@@ -79,18 +95,9 @@ public class FirewallTest {
         assertTrue("Missing IPv4 sink default route", v4);
         assertTrue("Missing IPv6 sink default route", v6);
 
-        // Explicit physical-network binding must not bypass the blocking tunnel.
-        for (Network network : cm.getAllNetworks()) {
-            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-            if (caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                cm.bindProcessToNetwork(network);
-                assertFalse("Physical-network binding bypassed firewall", connects());
-                cm.bindProcessToNetwork(null);
-                break;
-            }
-        }
-        setRules(Collections.singleton(context.getPackageName()));
+        // Probe an ordinary app UID: the VPN owner's UID has protect privileges.
+        assertFalse("Physical-network binding bypassed firewall", connects(true));
+        setRules(Collections.singleton(PROBE));
         expectReachable();
         setRules(Collections.emptySet());
         assertFalse("Revoked app still has Internet", connects());
