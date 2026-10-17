@@ -72,9 +72,16 @@ public class MainActivity extends Activity {
             public void onTextChanged(CharSequence s, int a, int b, int c) { filter(); }
             public void afterTextChanged(Editable e) {}
         });
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(updates, new IntentFilter(FirewallService.STATUS), Context.RECEIVER_NOT_EXPORTED);
-        else registerReceiver(updates, new IntentFilter(FirewallService.STATUS));
+        registerUpdates();
         updateStatus();
+    }
+
+    @android.annotation.SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private void registerUpdates() {
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(updates, new IntentFilter(FirewallService.STATUS), Context.RECEIVER_NOT_EXPORTED);
+        // Pre-33 Android lacks NOT_EXPORTED. A signature permission protects
+        // this app-private status receiver instead; no AndroidX runtime needed.
+        else registerReceiver(updates, new IntentFilter(FirewallService.STATUS), "com.kozzzak.simplefirewall.INTERNAL", null);
     }
 
     @Override protected void onResume() { super.onResume(); allowed = Rules.allowed(this); updateStatus(); loadApps(); }
