@@ -139,6 +139,13 @@ public class FirewallTest {
         expectReachable();
     }
     @Test public void fullListAndSearchRespectSameFilter() throws Exception {
+        // Spinner selection callbacks are delivered during layout. Open the
+        // real page before interacting with it, as a person does.
+        instrumentation.runOnMainSync(() -> {
+            android.view.View tab = findDescription(screen.getWindow().getDecorView(), "Вкладка Приложения");
+            assertNotNull(tab); tab.performClick();
+        });
+        instrumentation.waitForIdleSync();
         android.content.pm.PackageManager pm = context.getPackageManager();
         java.util.Set<Long> expected = new java.util.HashSet<>();
         java.util.List<android.content.pm.PackageInfo> installed = pm.getInstalledPackages(android.content.pm.PackageManager.GET_PERMISSIONS);
@@ -182,13 +189,25 @@ public class FirewallTest {
             ((android.widget.Spinner) screen.findViewById(R.id.app_filter)).setSelection(1);
         });
         instrumentation.waitForIdleSync();
-        Thread.sleep(200);
+        Thread.sleep(500);
         instrumentation.runOnMainSync(() -> {
             android.widget.ListView list = screen.findViewById(R.id.app_list);
             assertEquals("Search must not override Ordinary filter", 0, list.getCount());
             ((android.widget.Spinner) screen.findViewById(R.id.app_filter)).setSelection(0);
             ((android.widget.EditText) screen.findViewById(R.id.app_search)).setText("");
         });
+    }
+
+    private android.view.View findDescription(android.view.View view, String description) {
+        if (description.contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription())) return view;
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                android.view.View found = findDescription(group.getChildAt(i), description);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     @Test public void trafficPermissionAndRealUidAccounting() throws Exception {
