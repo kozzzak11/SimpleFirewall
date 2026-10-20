@@ -36,7 +36,7 @@ jobs:
       - name: Start local network probe
         run: |
           mkdir -p /tmp/sf-probe
-          echo sf-ok > /tmp/sf-probe/probe.txt
+          python3 -c "from pathlib import Path; Path('/tmp/sf-probe/probe.txt').write_bytes(b'sf-ok' + b'x' * 262144)"
           python3 -m http.server 8787 --bind 0.0.0.0 --directory /tmp/sf-probe > /tmp/sf-probe.log 2>&1 &
       - name: Verify firewall on Android 15
         uses: reactivecircus/android-emulator-runner@v2
@@ -75,7 +75,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view v1.1.0 >/dev/null 2>&1 || gh release create v1.1.0 --target "$GITHUB_SHA" --title 'SimpleFirewall 1.1.0' --notes 'Two bottom tabs: Firewall controls and full-height application allowlist. APK built and network-tested on Android 15 emulator. Development signing certificate.'
-          gh release upload v1.1.0 SimpleFirewall.apk --clobber
+          gh release view v1.2.0 >/dev/null 2>&1 || gh release create v1.2.0 --target "$GITHUB_SHA" --title 'SimpleFirewall 1.2.0' --notes 'Traffic monitoring, consistent complete application list and more stable VPN rule updates. Verified on Android 15 emulator. Development signing certificate.'
+          gh release upload v1.2.0 SimpleFirewall.apk --clobber
     permissions:
       contents: write

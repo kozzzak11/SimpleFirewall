@@ -11,7 +11,7 @@ public class ProbeReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context c, Intent request) {
         PendingResult pending = goAsync();
         new Thread(() -> {
-            boolean reachable = false;
+            boolean reachable = false, vpn = false;
             ConnectivityManager cm = c.getSystemService(ConnectivityManager.class);
             try {
                 if (request.getBooleanExtra("bind", false)) {
@@ -23,6 +23,9 @@ public class ProbeReceiver extends BroadcastReceiver {
                         }
                     }
                 }
+                Network current = cm.getActiveNetwork();
+                NetworkCapabilities currentCaps = current == null ? null : cm.getNetworkCapabilities(current);
+                vpn = currentCaps != null && currentCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
                 try (Socket socket = new Socket()) {
                     socket.connect(new InetSocketAddress("10.0.2.2", 8787), 1200);
                     socket.setSoTimeout(1200);
@@ -38,7 +41,7 @@ public class ProbeReceiver extends BroadcastReceiver {
                 cm.bindProcessToNetwork(null);
                 c.sendBroadcast(new Intent("com.kozzzak.simplefirewall.PROBE_RESULT")
                     .setPackage("com.kozzzak.simplefirewall")
-                    .putExtra("request", request.getStringExtra("request")).putExtra("reachable", reachable));
+                    .putExtra("request", request.getStringExtra("request")).putExtra("reachable", reachable).putExtra("vpn", vpn));
                 pending.finish();
             }
         }, "network-probe").start();

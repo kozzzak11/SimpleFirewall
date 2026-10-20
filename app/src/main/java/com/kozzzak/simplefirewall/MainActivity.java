@@ -25,10 +25,12 @@ public class MainActivity extends Activity {
     private TextView status, count, allowedSummary;
     private FrameLayout pages;
     private View firewallPage, appsPage;
-    private Button firewallTab, appsTab;
+    private Button firewallTab, appsTab, trafficTab;
+    private TrafficPage trafficPage;
+    private boolean resumed;
     private int currentTab;
     private EditText search;
-    private CheckBox system;
+    private Spinner appFilter;
     private AppAdapter adapter;
     private boolean binding;
     private final BroadcastReceiver updates = new BroadcastReceiver() {
@@ -50,6 +52,8 @@ public class MainActivity extends Activity {
         appsPage = buildAppsPage();
         pages.addView(firewallPage, new FrameLayout.LayoutParams(-1, -1));
         pages.addView(appsPage, new FrameLayout.LayoutParams(-1, -1));
+        trafficPage = new TrafficPage(this);
+        pages.addView(trafficPage, new FrameLayout.LayoutParams(-1, -1));
         root.addView(pages, new LinearLayout.LayoutParams(-1, 0, 1));
 
         View divider = new View(this); divider.setBackgroundColor(CARD);
@@ -58,17 +62,23 @@ public class MainActivity extends Activity {
         navigation.setPadding(dp(12), dp(6), dp(12), dp(6));
         firewallTab = navButton("Firewall", R.drawable.ic_shield, 0);
         appsTab = navButton("Приложения", R.drawable.ic_apps, 1);
+        trafficTab = navButton("Трафик", R.drawable.ic_traffic, 2);
         navigation.addView(firewallTab, new LinearLayout.LayoutParams(0, dp(64), 1));
         LinearLayout.LayoutParams appsNavParams = new LinearLayout.LayoutParams(0, dp(64), 1);
-        appsNavParams.leftMargin = dp(8); navigation.addView(appsTab, appsNavParams);
+        appsNavParams.leftMargin = dp(4); navigation.addView(appsTab, appsNavParams);
+        LinearLayout.LayoutParams trafficNavParams = new LinearLayout.LayoutParams(0, dp(64), 1);
+        trafficNavParams.leftMargin = dp(4); navigation.addView(trafficTab, trafficNavParams);
         root.addView(navigation);
         if (state != null) {
             search.setText(state.getString("query", ""));
-            system.setChecked(state.getBoolean("system", false));
+            appFilter.setSelection(state.getInt("filter", 0));
         }
         selectTab(state != null ? state.getInt("tab", 0) : Rules.prefs(this).getInt("tab", 0));
         power.setOnCheckedChangeListener((button, checked) -> { if (!binding) { if (checked) requestStart(); else stopFirewall(); } });
-        system.setOnCheckedChangeListener((v, checked) -> filter());
+        appFilter.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            public void onNothingSelected(AdapterView<?> p) {}
+            public void onItemSelected(AdapterView<?> p, View view, int position, long id) { filter(); }
+        });
         search.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int c, int f) {}
             public void onTextChanged(CharSequence s, int a, int b, int c) { filter(); }
@@ -97,6 +107,14 @@ public class MainActivity extends Activity {
         choose.setTextColor(BG); choose.setBackground(round(ACCENT, 14));
         LinearLayout.LayoutParams chooseParams = new LinearLayout.LayoutParams(-1, dp(52)); chooseParams.topMargin = dp(14);
         page.addView(choose, chooseParams); choose.setOnClickListener(v -> selectTab(1));
+        Button repair = new Button(this); repair.setAllCaps(false); repair.setText("Восстановить соединение"); repair.setTextSize(14);
+        repair.setTextColor(WHITE); repair.setBackground(round(CARD, 12));
+        LinearLayout.LayoutParams repairParams = new LinearLayout.LayoutParams(-1, dp(48)); repairParams.topMargin = dp(12);
+        page.addView(repair, repairParams);
+        repair.setOnClickListener(v -> {
+            if (Rules.enabled(this)) startForegroundService(new Intent(this, FirewallService.class).setAction(FirewallService.REPAIR));
+            else Toast.makeText(this, "Сначала включите Firewall", Toast.LENGTH_SHORT).show();
+        });
         TextView help = text("Как это работает", 14, MUTED); help.setGravity(Gravity.CENTER); help.setPadding(0, dp(24), 0, dp(16));
         page.addView(help, new LinearLayout.LayoutParams(-1, -2)); help.setOnClickListener(v -> showHelp());
         return scroll;
@@ -107,16 +125,18 @@ public class MainActivity extends Activity {
         TextView title = text("Приложения", 24, WHITE); title.setTypeface(null, Typeface.BOLD); page.addView(title);
         TextView subtitle = text("Отметь приложения с доступом в интернет", 13, MUTED);
         subtitle.setPadding(0, dp(4), 0, dp(12)); page.addView(subtitle);
-        search = new EditText(this); search.setSingleLine(true); search.setTextSize(15); search.setTextColor(WHITE);
+        search = new EditText(this); search.setId(R.id.app_search); search.setSingleLine(true); search.setTextSize(15); search.setTextColor(WHITE);
         search.setHintTextColor(MUTED); search.setHint("Поиск приложений");
         search.setPadding(dp(14), 0, dp(14), 0); search.setBackground(round(CARD, 12));
         page.addView(search, new LinearLayout.LayoutParams(-1, dp(44)));
         LinearLayout toolbar = new LinearLayout(this); toolbar.setGravity(Gravity.CENTER_VERTICAL);
         count = text("Загрузка…", 13, MUTED); count.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.addView(count, new LinearLayout.LayoutParams(0, dp(42), 1));
-        system = new CheckBox(this); system.setText("Системные"); system.setTextColor(MUTED); system.setTextSize(13);
-        toolbar.addView(system); page.addView(toolbar);
-        ListView list = new ListView(this); list.setDivider(null); list.setDividerHeight(dp(5));
+        toolbar.addView(count, new LinearLayout.LayoutParams(0, dp(48), 1));
+        appFilter = new Spinner(this); appFilter.setId(R.id.app_filter); appFilter.setContentDescription("Фильтр приложений");
+        appFilter.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
+            new String[]{"Все", "Обычные", "Системные"}));
+        toolbar.addView(appFilter, new LinearLayout.LayoutParams(dp(150), dp(48))); page.addView(toolbar);
+        ListView list = new ListView(this); list.setId(R.id.app_list); list.setDivider(null); list.setDividerHeight(dp(5));
         list.setCacheColorHint(BG); adapter = new AppAdapter(); list.setAdapter(adapter);
         page.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
         return page;
@@ -133,12 +153,14 @@ public class MainActivity extends Activity {
     }
 
     private void selectTab(int tab) {
-        currentTab = tab == 1 ? 1 : 0;
+        currentTab = tab >= 0 && tab <= 2 ? tab : 0;
         firewallPage.setVisibility(currentTab == 0 ? View.VISIBLE : View.GONE);
         appsPage.setVisibility(currentTab == 1 ? View.VISIBLE : View.GONE);
-        styleTab(firewallTab, currentTab == 0); styleTab(appsTab, currentTab == 1);
+        trafficPage.setVisibility(currentTab == 2 ? View.VISIBLE : View.GONE);
+        styleTab(firewallTab, currentTab == 0); styleTab(appsTab, currentTab == 1); styleTab(trafficTab, currentTab == 2);
+        if (resumed && currentTab == 2) trafficPage.resume(); else trafficPage.pause();
         Rules.prefs(this).edit().putInt("tab", currentTab).apply();
-        if (currentTab == 0) {
+        if (currentTab != 1) {
             search.clearFocus();
             android.view.inputmethod.InputMethodManager keyboard = getSystemService(android.view.inputmethod.InputMethodManager.class);
             keyboard.hideSoftInputFromWindow(search.getWindowToken(), 0);
@@ -151,7 +173,7 @@ public class MainActivity extends Activity {
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putInt("tab", currentTab); state.putString("query", search.getText().toString());
-        state.putBoolean("system", system.isChecked()); super.onSaveInstanceState(state);
+        state.putInt("filter", appFilter.getSelectedItemPosition()); super.onSaveInstanceState(state);
     }
 
     @android.annotation.SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -164,6 +186,8 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        resumed = true;
+        if (currentTab == 2) trafficPage.resume();
         allowed = Rules.allowed(this);
         if (Rules.enabled(this) && !FirewallService.running) {
             if (VpnService.prepare(this) == null) startFirewall();
@@ -186,7 +210,7 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 20);
         Rules.enabled(this, true);
         FirewallService.error = "";
-        try { startForegroundService(new Intent(this, FirewallService.class)); }
+        try { startForegroundService(new Intent(this, FirewallService.class).setAction(FirewallService.START)); }
         catch (RuntimeException e) { Rules.enabled(this, false); FirewallService.error = "Не удалось запустить firewall."; }
         updateStatus();
     }
@@ -199,7 +223,7 @@ public class MainActivity extends Activity {
         boolean desired = Rules.enabled(this);
         power.setChecked(desired); binding = false;
         String error = FirewallService.error;
-        status.setText(!error.isEmpty() ? error : desired ? (FirewallService.running ? "Включён · остальные приложения без интернета" : "Запуск…") : "Выключен · доступ есть у всех приложений");
+        status.setText(!error.isEmpty() ? error : desired ? (FirewallService.updating ? "Применение правил…" : FirewallService.running ? "Включён · остальные приложения без интернета" : "Запуск…") : "Выключен · доступ есть у всех приложений");
         status.setTextColor(!error.isEmpty() ? Color.rgb(255,172,140) : desired ? ACCENT : MUTED);
     }
 
@@ -212,6 +236,7 @@ public class MainActivity extends Activity {
                 AppGroup g = groups.computeIfAbsent(info.applicationInfo.uid, uid -> new AppGroup());
                 if (info.requestedPermissions != null && Arrays.asList(info.requestedPermissions).contains(Manifest.permission.INTERNET)) g.network = true;
                 g.packages.add(info.packageName);
+                if (pm.getLaunchIntentForPackage(info.packageName) != null) g.launchable = true;
                 String label = info.applicationInfo.loadLabel(pm).toString();
                 g.labels.add(label);
                 if (g.info == null) g.info = info.applicationInfo;
@@ -237,9 +262,11 @@ public class MainActivity extends Activity {
         visible.clear(); int n = 0;
         for (AppGroup g : all) {
             boolean selected = selected(g); if (selected) n++;
-            if ((system.isChecked() || g.user || selected || !q.isEmpty()) && (g.label + " " + g.details).toLowerCase(Locale.ROOT).contains(q)) visible.add(g);
+            int mode = appFilter.getSelectedItemPosition();
+            boolean included = mode == 0 || (mode == 1 ? (g.user || g.launchable) : !g.user);
+            if (included && (g.label + " " + g.details).toLowerCase(Locale.ROOT).contains(q)) visible.add(g);
         }
-        count.setText("Разрешено: " + n);
+        count.setText("В списке: " + visible.size() + " / " + all.size());
         allowedSummary.setText("Разрешено приложений: " + n); adapter.notifyDataSetChanged();
     }
 
@@ -247,7 +274,7 @@ public class MainActivity extends Activity {
         if (checked) allowed.addAll(g.packages); else allowed.removeAll(g.packages);
         Rules.save(this, allowed);
         if (Rules.enabled(this)) {
-            try { startForegroundService(new Intent(this, FirewallService.class)); }
+            try { startForegroundService(new Intent(this, FirewallService.class).setAction(FirewallService.UPDATE)); }
             catch (RuntimeException e) { FirewallService.error = "Правила не обновлены. Перезапустите firewall."; updateStatus(); }
         }
         filter();
@@ -255,7 +282,7 @@ public class MainActivity extends Activity {
 
     private void showHelp() {
         new AlertDialog.Builder(this).setTitle("SimpleFirewall")
-            .setMessage("Отметьте приложения и включите firewall. Новые приложения по умолчанию заблокированы. Настройки сохраняются.\n\nРаботает локально через VPN Android, без серверов, рекламы и сбора данных. Другой VPN одновременно использовать нельзя.\n\nСистемные приложения доступны по галочке «Системные». У приложений с общим UID доступ общий — они объединены в одну строку. Для push-уведомлений могут понадобиться сервисы Google.\n\nФильтруется трафик приложений текущего профиля, IPv4 и IPv6. Раздача интернета и другие профили не фильтруются.\n\nЕсли Android остановит службу, блокировка прекратится. Режим «Блокировать соединения без VPN» с этой версией несовместим: выбранные приложения выходят в интернет напрямую.\n\nПосле перезагрузки телефона откройте приложение для возобновления работы.")
+            .setMessage("Отметьте приложения и включите firewall. Новые приложения по умолчанию заблокированы. Настройки сохраняются.\n\nРаботает локально через VPN Android, без серверов, рекламы и сбора данных. Другой VPN одновременно использовать нельзя.\n\nПо умолчанию показаны все приложения с разрешением на сеть. Фильтр «Обычные» включает предустановленные приложения с иконкой запуска. Поиск не меняет выбранный фильтр. У приложений с общим UID доступ общий — они объединены в одну строку. Для push-уведомлений могут понадобиться сервисы Google.\n\nФильтруется трафик приложений текущего профиля, IPv4 и IPv6. Раздача интернета и другие профили не фильтруются.\n\nЕсли Android остановит службу, блокировка прекратится. Режим «Блокировать соединения без VPN» с этой версией несовместим: выбранные приложения выходят в интернет напрямую.\n\nПосле перезагрузки телефона откройте приложение для возобновления работы.")
             .setPositiveButton("Понятно", null).show();
     }
 
@@ -285,7 +312,7 @@ public class MainActivity extends Activity {
     private static class Row { ImageView icon; TextView title, detail; CheckBox check; }
     private static class AppGroup {
         final ArrayList<String> packages = new ArrayList<>(); final TreeSet<String> labels = new TreeSet<>();
-        String label, details; boolean user, network; ApplicationInfo info;
+        String label, details; boolean user, network, launchable; ApplicationInfo info;
     }
     private LinearLayout column() { LinearLayout v = new LinearLayout(this); v.setOrientation(LinearLayout.VERTICAL); return v; }
     private TextView text(String value, int size, int color) {
@@ -293,5 +320,6 @@ public class MainActivity extends Activity {
     }
     private GradientDrawable round(int color, int radius) { GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(radius)); return d; }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
-    @Override protected void onDestroy() { unregisterReceiver(updates); loader.shutdown(); super.onDestroy(); }
+    @Override protected void onPause() { resumed = false; trafficPage.pause(); super.onPause(); }
+    @Override protected void onDestroy() { trafficPage.close(); unregisterReceiver(updates); loader.shutdown(); super.onDestroy(); }
 }

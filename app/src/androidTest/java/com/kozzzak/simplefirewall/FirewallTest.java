@@ -20,6 +20,8 @@ import static org.junit.Assert.*;
 public class FirewallTest {
     private static final String PROBE = "com.kozzzak.simplefirewall.probe";
     private final android.app.Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+    private MainActivity screen;
+    private volatile boolean lastProbeVpn;
     private final Context context = instrumentation.getTargetContext();
 
     private void command(String value) throws Exception {
@@ -31,7 +33,7 @@ public class FirewallTest {
     private void setRules(java.util.Set<String> packages) throws Exception {
         long previous = FirewallService.appliedGeneration;
         Rules.save(context, packages); Rules.enabled(context, true);
-        instrumentation.runOnMainSync(() -> context.startForegroundService(new Intent(context, FirewallService.class)));
+        instrumentation.runOnMainSync(() -> context.startForegroundService(new Intent(context, FirewallService.class).setAction(FirewallService.UPDATE)));
         instrumentation.waitForIdleSync();
         long end = System.currentTimeMillis() + 6000;
         while ((!FirewallService.running || FirewallService.appliedGeneration <= previous)
@@ -47,7 +49,7 @@ public class FirewallTest {
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
                 if (request.equals(i.getStringExtra("request"))) {
-                    reachable.set(i.getBooleanExtra("reachable", false)); reply.countDown();
+                    reachable.set(i.getBooleanExtra("reachable", false)); lastProbeVpn = i.getBooleanExtra("vpn", false); reply.countDown();
                 }
             }
         };
@@ -63,7 +65,7 @@ public class FirewallTest {
         finally { context.unregisterReceiver(receiver); }
     }
     private void expectReachable() throws Exception {
-        for (int i = 0; i < 5; i++) { if (connects()) return; Thread.sleep(100); }
+        for (int i = 0; i < 5; i++) { if (connects() && !lastProbeVpn) return; Thread.sleep(100); }
         fail("Allowed app cannot reach local test server");
     }
     private void expectBlocked(String message) {
@@ -80,7 +82,7 @@ public class FirewallTest {
 
     @Before public void prepare() throws Exception {
         command("appops set " + context.getPackageName() + " ACTIVATE_VPN allow");
-        instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        screen = (MainActivity) instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         expectReachable();
     }
     @After public void cleanup() {
@@ -113,6 +115,17 @@ public class FirewallTest {
         assertFalse("Physical-network binding bypassed firewall", connects(true));
         setRules(Collections.singleton(PROBE));
         expectReachable();
+        // Repeated UI/update commands must leave a permitted app usable.
+        for (int i = 0; i < 3; i++) {
+            instrumentation.runOnMainSync(() -> context.startForegroundService(new Intent(context, FirewallService.class).setAction(FirewallService.UPDATE)));
+            Thread.sleep(350); expectReachable();
+        }
+        long beforeRepair = FirewallService.appliedGeneration;
+        instrumentation.runOnMainSync(() -> context.startForegroundService(new Intent(context, FirewallService.class).setAction(FirewallService.REPAIR)));
+        long repairBy = System.currentTimeMillis() + 6000;
+        while (FirewallService.appliedGeneration <= beforeRepair && System.currentTimeMillis() < repairBy) Thread.sleep(50);
+        assertTrue("Repair was not applied", FirewallService.appliedGeneration > beforeRepair);
+        expectReachable();
         setRules(Collections.emptySet());
         expectBlocked("Revoked app still has Internet after policy application");
         Rules.enabled(context, false);
@@ -125,4 +138,81 @@ public class FirewallTest {
         assertFalse("Firewall still reports active after STOP", FirewallService.running);
         expectReachable();
     }
+    @Test public void fullListAndSearchRespectSameFilter() throws Exception {
+        android.content.pm.PackageManager pm = context.getPackageManager();
+        java.util.Set<Long> expected = new java.util.HashSet<>();
+        java.util.List<android.content.pm.PackageInfo> installed = pm.getInstalledPackages(android.content.pm.PackageManager.GET_PERMISSIONS);
+        java.util.Map<Integer, Boolean> ordinary = new java.util.HashMap<>();
+        for (android.content.pm.PackageInfo info : installed) {
+            if (info.applicationInfo == null || info.packageName.equals(context.getPackageName())) continue;
+            int uid = info.applicationInfo.uid;
+            boolean user = (info.applicationInfo.flags & android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0
+                || pm.getLaunchIntentForPackage(info.packageName) != null;
+            ordinary.put(uid, ordinary.getOrDefault(uid, false) || user);
+            if (info.requestedPermissions != null && java.util.Arrays.asList(info.requestedPermissions).contains(android.Manifest.permission.INTERNET))
+                expected.add((long) uid);
+        }
+        java.util.concurrent.atomic.AtomicReference<java.util.Set<Long>> displayed = new java.util.concurrent.atomic.AtomicReference<>();
+        long loadedBy = System.currentTimeMillis() + 10000;
+        do {
+            instrumentation.runOnMainSync(() -> {
+                android.widget.Spinner filter = screen.findViewById(R.id.app_filter);
+                assertEquals("Default list must include system apps", 0, filter.getSelectedItemPosition());
+                android.widget.ListView list = screen.findViewById(R.id.app_list);
+                java.util.Set<Long> ids = new java.util.HashSet<>();
+                for (int i = 0; i < list.getCount(); i++) ids.add(list.getAdapter().getItemId(i));
+                displayed.set(ids);
+            });
+            if (displayed.get().equals(expected)) break;
+            Thread.sleep(50);
+        } while (System.currentTimeMillis() < loadedBy);
+        assertEquals("Installed network-capable UID missing from default list", expected, displayed.get());
+        String hidden = null;
+        for (android.content.pm.PackageInfo info : installed) {
+            if (info.applicationInfo != null && expected.contains((long) info.applicationInfo.uid)
+                && !ordinary.getOrDefault(info.applicationInfo.uid, false)) { hidden = info.packageName; break; }
+        }
+        assertNotNull("Emulator needs a system network app for the regression", hidden);
+        final String query = hidden;
+        instrumentation.runOnMainSync(() -> {
+            android.widget.EditText search = screen.findViewById(R.id.app_search);
+            search.setText(query);
+            android.widget.ListView list = screen.findViewById(R.id.app_list);
+            assertTrue("Search must find system app in All", list.getCount() > 0);
+            ((android.widget.Spinner) screen.findViewById(R.id.app_filter)).setSelection(1);
+        });
+        instrumentation.waitForIdleSync();
+        Thread.sleep(200);
+        instrumentation.runOnMainSync(() -> {
+            android.widget.ListView list = screen.findViewById(R.id.app_list);
+            assertEquals("Search must not override Ordinary filter", 0, list.getCount());
+            ((android.widget.Spinner) screen.findViewById(R.id.app_filter)).setSelection(0);
+            ((android.widget.EditText) screen.findViewById(R.id.app_search)).setText("");
+        });
+    }
+
+    @Test public void trafficPermissionAndRealUidAccounting() throws Exception {
+        command("appops set " + context.getPackageName() + " GET_USAGE_STATS deny");
+        assertFalse(TrafficMonitor.hasAccess(context));
+        TrafficMonitor.Snapshot denied = TrafficMonitor.read(context, System.currentTimeMillis() - 86400000, System.currentTimeMillis());
+        assertEquals(0, denied.networks);
+        assertFalse(denied.error.isEmpty());
+        try {
+            command("appops set " + context.getPackageName() + " GET_USAGE_STATS allow");
+            assertTrue(TrafficMonitor.hasAccess(context));
+            expectReachable();
+            command("dumpsys netstats --poll");
+            int uid = context.getPackageManager().getApplicationInfo(PROBE, 0).uid;
+            TrafficMonitor.Snapshot data = null;
+            long countedBy = System.currentTimeMillis() + 10000;
+            do {
+                data = TrafficMonitor.read(context, TrafficMonitor.startOfPeriod(0), System.currentTimeMillis());
+                if (data.byUid.containsKey(uid) && data.byUid.get(uid).rx > 0) break;
+                Thread.sleep(300); command("dumpsys netstats --poll");
+            } while (System.currentTimeMillis() < countedBy);
+            assertTrue("NetworkStats query unavailable: " + data.error, data.networks > 0);
+            assertTrue("Received probe bytes not attributed to its UID", data.byUid.containsKey(uid) && data.byUid.get(uid).rx > 0);
+        } finally { command("appops set " + context.getPackageName() + " GET_USAGE_STATS deny"); }
+    }
+
 }
