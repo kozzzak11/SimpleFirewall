@@ -16,6 +16,10 @@ public class FirewallService extends VpnService {
     static final String REPAIR = "com.kozzzak.simplefirewall.REPAIR";
     static final String STOP = "com.kozzzak.simplefirewall.STOP";
     static final String STATUS = "com.kozzzak.simplefirewall.STATUS";
+    static final String ENABLE = "com.kozzzak.simplefirewall.ENABLE";
+    private static final int ONGOING_ID = 1, OFF_ID = 2;
+    /** Debounce for physical network switches; address/DNS churn never rebuilds the VPN. */
+    private static final long NETWORK_SETTLE_MS = 3000;
     static volatile boolean running, updating;
     static volatile Set<String> appliedPackages = Collections.emptySet();
     static volatile long appliedGeneration;
@@ -38,19 +42,24 @@ public class FirewallService extends VpnService {
         if (current.equals(topology)) return;
         topology = current;
         if (Rules.enabled(this) && running) {
-            handler.removeCallbacks(repairNetwork); handler.postDelayed(repairNetwork, 750);
+            handler.removeCallbacks(repairNetwork); handler.postDelayed(repairNetwork, NETWORK_SETTLE_MS);
         }
     }
+    /**
+     * Identity of the physical networks only. IPv6 privacy addresses, DNS
+     * updates, validation and signal changes happen constantly and must not
+     * recreate the TUN: every rebuild is churn for the system and for
+     * long-lived connections such as push. The TUN follows the default
+     * network by itself (setUnderlyingNetworks(null)); selected apps bypass it.
+     */
     private String physicalStamp() {
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
-        TreeSet<String> state = new TreeSet<>();
+        TreeSet<Long> state = new TreeSet<>();
         for (Network n : cm.getAllNetworks()) {
             NetworkCapabilities caps = cm.getNetworkCapabilities(n);
             if (caps == null || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
                 || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue;
-            LinkProperties links = cm.getLinkProperties(n);
-            state.add(n.toString() + ":" + caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                + ":" + (links == null ? "" : links.getDnsServers().toString() + links.getLinkAddresses().toString()));
+            state.add(n.getNetworkHandle());
         }
         return state.toString();
     }
@@ -70,6 +79,7 @@ public class FirewallService extends VpnService {
         super.onCreate();
         getSystemService(NotificationManager.class).createNotificationChannel(
             new NotificationChannel("firewall", "Firewall", NotificationManager.IMPORTANCE_LOW));
+        createAlertChannel(this);
         IntentFilter filter = new IntentFilter();
         filter.addAction(Intent.ACTION_PACKAGE_ADDED);
         filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
@@ -90,22 +100,53 @@ public class FirewallService extends VpnService {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
         if (STOP.equals(action)) {
-            error = ""; shutdown(); return START_NOT_STICKY;
+            error = ""; Rules.interrupted(this, false); shutdown(true); return START_NOT_STICKY;
         }
+        // Every other command may come from startForegroundService(). Satisfy
+        // the foreground contract first, before any exit path, or Android
+        // kills the app for not calling startForeground() in time.
+        try { startForeground(ONGOING_ID, notification()); }
+        catch (RuntimeException e) { /* background start refused; the checks below still run */ }
         // A queued START after STOP must restore the latest requested state.
         // UPDATE/REPAIR never turn on a firewall the user has switched off.
-        if (intent != null && !UPDATE.equals(action) && !REPAIR.equals(action)) Rules.enabled(this, true);
-        if (!Rules.enabled(this)) { shutdown(); return START_NOT_STICKY; }
-        startForeground(1, notification());
+        // Explicit START and the system's always-on start (android.net.VpnService).
+        boolean explicit = intent != null && !UPDATE.equals(action) && !REPAIR.equals(action);
+        if (explicit) {
+            Rules.enabled(this, true); Rules.interrupted(this, false);
+            getSystemService(NotificationManager.class).cancel(OFF_ID);
+        }
+        // START_STICKY restart (null intent): resume only if nothing else took the VPN.
+        if (!Rules.enabled(this) || (!explicit && Rules.interrupted(this) && !running)) {
+            shutdown(false); return START_NOT_STICKY;
+        }
         if (prepare(this) != null) {
-            fail("Нет разрешения на VPN. Включите firewall ещё раз.");
+            interrupt("Нет разрешения на VPN. Включите firewall ещё раз.");
             return START_NOT_STICKY;
         }
         if (UPDATE.equals(action) && running) {
             updating = true; changed();
             handler.removeCallbacks(updateRules); handler.postDelayed(updateRules, 250);
-        } else establishRules(REPAIR.equals(action));
-        return Rules.enabled(this) ? START_STICKY : START_NOT_STICKY;
+        } else establishRules(REPAIR.equals(action) || !running);
+        return START_STICKY;
+    }
+
+    static void createAlertChannel(Context c) {
+        NotificationChannel alerts = new NotificationChannel("alerts", "Firewall выключен", NotificationManager.IMPORTANCE_HIGH);
+        alerts.setDescription("Предупреждение, когда защита отключилась не по вашей команде");
+        c.getSystemService(NotificationManager.class).createNotificationChannel(alerts);
+    }
+    /** High-priority warning that blocking stopped, with a one-tap re-enable. */
+    static void notifyOff(Context c, String text) {
+        createAlertChannel(c);
+        Intent enable = new Intent(c, MainActivity.class).setAction(ENABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pending = PendingIntent.getActivity(c, 3, enable, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Notification n = new Notification.Builder(c, "alerts")
+            .setSmallIcon(R.drawable.ic_shield).setContentTitle("Firewall OFF")
+            .setContentText(text).setStyle(new Notification.BigTextStyle().bigText(text + "\nСейчас интернет доступен всем приложениям."))
+            .setCategory(Notification.CATEGORY_ERROR).setColor(0xffff8f7a).setAutoCancel(true).setContentIntent(pending)
+            .addAction(new Notification.Action.Builder(null, "Включить", pending).build()).build();
+        try { c.getSystemService(NotificationManager.class).notify(OFF_ID, n); }
+        catch (SecurityException ignored) { /* notifications not permitted */ }
     }
 
     private Notification notification() {
@@ -129,6 +170,9 @@ public class FirewallService extends VpnService {
             // Selected applications bypass this local sink. Everything else enters
             // both default routes and is dropped. Never call allowBypass().
             Builder builder = new Builder().setSession("SimpleFirewall").setMtu(1500)
+                // Inherit meteredness from the real network instead of the
+                // Android 10+ default "always metered" for VPNs.
+                .setMetered(false)
                 .addAddress("10.111.0.1", 32).addRoute("0.0.0.0", 0)
                 .addAddress("fd42:7366::1", 128).addRoute("::", 0);
             builder.setUnderlyingNetworks(null);
@@ -170,22 +214,25 @@ public class FirewallService extends VpnService {
                 // Keep the previous blocking policy on a failed rules update.
                 error = "Правила не обновлены. Выключите и включите firewall.";
                 changed();
-            } else fail("Не удалось включить firewall: " + e.getClass().getSimpleName());
+            } else interrupt("Не удалось включить firewall: " + e.getClass().getSimpleName());
         }
     }
 
-    private void fail(String message) {
+    /** Blocking stopped against the user's wish: keep the intent, warn loudly. */
+    private void interrupt(String message) {
         error = message;
-        shutdown();
+        Rules.interrupted(this, true);
+        notifyOff(this, message);
+        shutdown(false);
     }
     private void closeTunnel() {
         if (tunnel != null) try { tunnel.close(); } catch (IOException ignored) {}
         tunnel = null;
         running = false; updating = false; lastAllowed = null; appliedPackages = Collections.emptySet();
     }
-    private void shutdown() {
+    private void shutdown(boolean userStop) {
         handler.removeCallbacks(updateRules); handler.removeCallbacks(repairNetwork);
-        Rules.enabled(this, false);
+        if (userStop) Rules.enabled(this, false);
         // The system is bound to VpnService while the TUN exists. stopSelf()
         // alone does not trigger onDestroy, so close the connection explicitly.
         closeTunnel();
@@ -196,10 +243,9 @@ public class FirewallService extends VpnService {
     private void changed() { sendBroadcast(new Intent(STATUS).setPackage(getPackageName())); }
 
     @Override public void onRevoke() {
-        new android.os.Handler(getMainLooper()).post(() -> {
-            error = "Firewall отключён системой или другим VPN.";
-            shutdown();
-        });
+        // Another VPN took the slot or the user disconnected it in Settings.
+        // The enabled flag stays: this was not a command from our UI.
+        handler.post(() -> interrupt("Firewall отключён системой или другим VPN."));
     }
     @Override public void onDestroy() {
         if (registered) unregisterReceiver(packages);

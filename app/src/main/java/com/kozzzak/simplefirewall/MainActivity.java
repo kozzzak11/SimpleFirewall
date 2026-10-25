@@ -1,46 +1,49 @@
 package com.kozzzak.simplefirewall;
 
 import android.Manifest;
+import android.animation.*;
 import android.app.*;
 import android.content.*;
 import android.content.pm.*;
-import android.graphics.Color;
-import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.VpnService;
 import android.os.*;
 import android.text.*;
 import android.view.*;
+import android.view.animation.AccelerateDecelerateInterpolator;
 import android.widget.*;
 import java.util.*;
 import java.util.concurrent.*;
+import static com.kozzzak.simplefirewall.Ui.*;
 
 public class MainActivity extends Activity {
-    private static final int BG = Color.rgb(16,18,17), CARD = Color.rgb(29,32,29),
-        WHITE = Color.rgb(244,247,239), MUTED = Color.rgb(161,171,157), ACCENT = Color.rgb(212,255,104);
     private final ExecutorService loader = Executors.newSingleThreadExecutor();
     private final ArrayList<AppGroup> all = new ArrayList<>(), visible = new ArrayList<>();
     private Set<String> allowed;
-    private Switch power;
-    private TextView status, count, allowedSummary;
+    private TextView status, stateTitle, count, allowedBadge, allowedValue, todayValue, todayCaption;
+    private View heroRing, heroHalo;
+    private ImageView heroIcon;
+    private ObjectAnimator pulse;
     private FrameLayout pages;
     private View firewallPage, appsPage;
-    private Button firewallTab, appsTab, trafficTab;
+    private final ArrayList<View> pushHints = new ArrayList<>();
+    private LinearLayout firewallTab, appsTab, trafficTab;
     private TrafficPage trafficPage;
     private boolean resumed;
-    private int currentTab;
+    private int currentTab = -1;
     private EditText search;
-    private Spinner appFilter;
+    private ChipGroup appFilter;
     private AppAdapter adapter;
-    private boolean binding;
+    private IconCache icons;
     private final BroadcastReceiver updates = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) { updateStatus(); }
     };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        icons = IconCache.get(this);
         allowed = Rules.allowed(this);
-        LinearLayout root = column();
+        LinearLayout root = column(this);
         root.setBackgroundColor(BG);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             v.setPadding(0, insets.getSystemWindowInsetTop(), 0, insets.getSystemWindowInsetBottom());
@@ -56,29 +59,24 @@ public class MainActivity extends Activity {
         pages.addView(trafficPage, new FrameLayout.LayoutParams(-1, -1));
         root.addView(pages, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        View divider = new View(this); divider.setBackgroundColor(CARD);
-        root.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
-        LinearLayout navigation = new LinearLayout(this);
-        navigation.setPadding(dp(12), dp(6), dp(12), dp(6));
+        LinearLayout navigation = row(this);
+        navigation.setPadding(dp(this, 6), dp(this, 6), dp(this, 6), dp(this, 6));
+        navigation.setBackground(outlined(this, SURFACE, STROKE, 26));
         firewallTab = navButton("Firewall", R.drawable.ic_shield, 0);
         appsTab = navButton("Приложения", R.drawable.ic_apps, 1);
         trafficTab = navButton("Трафик", R.drawable.ic_traffic, 2);
-        navigation.addView(firewallTab, new LinearLayout.LayoutParams(0, dp(64), 1));
-        LinearLayout.LayoutParams appsNavParams = new LinearLayout.LayoutParams(0, dp(64), 1);
-        appsNavParams.leftMargin = dp(4); navigation.addView(appsTab, appsNavParams);
-        LinearLayout.LayoutParams trafficNavParams = new LinearLayout.LayoutParams(0, dp(64), 1);
-        trafficNavParams.leftMargin = dp(4); navigation.addView(trafficTab, trafficNavParams);
-        root.addView(navigation);
+        navigation.addView(firewallTab, new LinearLayout.LayoutParams(0, dp(this, 56), 1));
+        navigation.addView(appsTab, new LinearLayout.LayoutParams(0, dp(this, 56), 1));
+        navigation.addView(trafficTab, new LinearLayout.LayoutParams(0, dp(this, 56), 1));
+        LinearLayout.LayoutParams navParams = new LinearLayout.LayoutParams(-1, -2);
+        navParams.setMargins(dp(this, 14), dp(this, 4), dp(this, 14), dp(this, 10));
+        root.addView(navigation, navParams);
         if (state != null) {
             search.setText(state.getString("query", ""));
             appFilter.setSelection(state.getInt("filter", 0));
         }
         selectTab(state != null ? state.getInt("tab", 0) : Rules.prefs(this).getInt("tab", 0));
-        power.setOnCheckedChangeListener((button, checked) -> { if (!binding) { if (checked) requestStart(); else stopFirewall(); } });
-        appFilter.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            public void onNothingSelected(AdapterView<?> p) {}
-            public void onItemSelected(AdapterView<?> p, View view, int position, long id) { filter(); }
-        });
+        appFilter.setListener(position -> filter());
         search.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int c, int f) {}
             public void onTextChanged(CharSequence s, int a, int b, int c) { filter(); }
@@ -86,77 +84,185 @@ public class MainActivity extends Activity {
         });
         registerUpdates();
         updateStatus();
+        handleIntent(getIntent());
+    }
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); handleIntent(intent); }
+    private void handleIntent(Intent intent) {
+        if (intent != null && FirewallService.ENABLE.equals(intent.getAction())) {
+            setIntent(new Intent(this, MainActivity.class)); selectTab(0); requestStart();
+        }
     }
 
+    // ---------- Firewall ----------
     private View buildFirewallPage() {
-        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
-        LinearLayout page = column(); page.setPadding(dp(22), dp(22), dp(22), dp(16));
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout page = column(this); page.setPadding(dp(this, 20), dp(this, 18), dp(this, 20), dp(this, 16));
         scroll.addView(page);
-        TextView brand = text("SIMPLE / FIREWALL", 12, ACCENT);
-        brand.setLetterSpacing(.18f); page.addView(brand);
-        TextView title = text("Твой интернет.\nТвои правила.", 30, WHITE);
-        title.setTypeface(null, Typeface.BOLD); title.setPadding(0, dp(20), 0, dp(24)); page.addView(title);
-        LinearLayout card = column(); card.setPadding(dp(18), dp(15), dp(18), dp(18)); card.setBackground(round(CARD, 20));
-        power = new Switch(this); power.setText("Firewall"); power.setTextSize(21); power.setTextColor(WHITE); power.setSwitchPadding(dp(16));
-        power.setTypeface(null, Typeface.BOLD); card.addView(power, new LinearLayout.LayoutParams(-1, dp(48)));
-        status = text("Выключен", 14, MUTED); status.setPadding(0, dp(8), 0, 0); card.addView(status); page.addView(card);
-        TextView intro = text("Интернет только у выбранных приложений.\nОдни правила для Wi‑Fi и мобильной сети.", 15, MUTED);
-        intro.setPadding(0, dp(20), 0, dp(24)); page.addView(intro);
-        allowedSummary = text("Разрешено приложений: 0", 16, WHITE); page.addView(allowedSummary);
-        Button choose = new Button(this); choose.setText("Выбрать приложения  →"); choose.setAllCaps(false); choose.setTextSize(16);
-        choose.setTextColor(BG); choose.setBackground(round(ACCENT, 14));
-        LinearLayout.LayoutParams chooseParams = new LinearLayout.LayoutParams(-1, dp(52)); chooseParams.topMargin = dp(14);
-        page.addView(choose, chooseParams); choose.setOnClickListener(v -> selectTab(1));
-        Button repair = new Button(this); repair.setAllCaps(false); repair.setText("Восстановить соединение"); repair.setTextSize(14);
-        repair.setTextColor(WHITE); repair.setBackground(round(CARD, 12));
-        LinearLayout.LayoutParams repairParams = new LinearLayout.LayoutParams(-1, dp(48)); repairParams.topMargin = dp(12);
-        page.addView(repair, repairParams);
+        TextView brand = bold(this, "SIMPLE / FIREWALL", 12, ACCENT); brand.setLetterSpacing(.2f); page.addView(brand);
+        TextView title = bold(this, "Твой интернет.\nТвои правила.", 28, WHITE); title.setLineSpacing(0, 1.1f);
+        title.setPadding(0, dp(this, 12), 0, dp(this, 18)); page.addView(title);
+
+        LinearLayout hero = column(this); hero.setGravity(Gravity.CENTER_HORIZONTAL);
+        hero.setPadding(dp(this, 16), dp(this, 22), dp(this, 16), dp(this, 22)); hero.setBackground(outlined(this, CARD, STROKE, R_CARD));
+        FrameLayout dial = new FrameLayout(this);
+        heroHalo = new View(this);
+        dial.addView(heroHalo, new FrameLayout.LayoutParams(dp(this, 210), dp(this, 210), Gravity.CENTER));
+        heroRing = new View(this); heroRing.setId(R.id.power_button); heroRing.setClickable(true); heroRing.setFocusable(true);
+        dial.addView(heroRing, new FrameLayout.LayoutParams(dp(this, 150), dp(this, 150), Gravity.CENTER));
+        heroIcon = new ImageView(this); heroIcon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        dial.addView(heroIcon, new FrameLayout.LayoutParams(dp(this, 64), dp(this, 64), Gravity.CENTER));
+        hero.addView(dial, new LinearLayout.LayoutParams(dp(this, 210), dp(this, 210)));
+        heroRing.setOnClickListener(v -> {
+            v.animate().scaleX(.94f).scaleY(.94f).setDuration(90).withEndAction(() -> v.animate().scaleX(1).scaleY(1).setDuration(140).start()).start();
+            if (desired()) stopFirewall(); else requestStart();
+        });
+        stateTitle = bold(this, "Защита выключена", 22, WHITE); stateTitle.setGravity(Gravity.CENTER);
+        hero.addView(stateTitle, margins(-1, -2, this, 4));
+        status = text(this, "Выключен", 14, MUTED); status.setGravity(Gravity.CENTER); status.setLineSpacing(0, 1.15f);
+        hero.addView(status, margins(-1, -2, this, 8));
+        TextView hint = text(this, "Нажми на щит, чтобы включить или выключить", 12, FAINT); hint.setGravity(Gravity.CENTER);
+        hero.addView(hint, margins(-1, -2, this, 10));
+        page.addView(hero);
+        pulse = ObjectAnimator.ofPropertyValuesHolder(heroHalo,
+            PropertyValuesHolder.ofFloat(View.SCALE_X, .9f, 1.04f), PropertyValuesHolder.ofFloat(View.SCALE_Y, .9f, 1.04f),
+            PropertyValuesHolder.ofFloat(View.ALPHA, .55f, 1f));
+        pulse.setDuration(1600); pulse.setRepeatMode(ValueAnimator.REVERSE); pulse.setRepeatCount(ValueAnimator.INFINITE);
+        pulse.setInterpolator(new AccelerateDecelerateInterpolator());
+
+        LinearLayout stats = row(this);
+        LinearLayout allowedCard = statCard("Разрешено"); allowedValue = (TextView) allowedCard.getChildAt(1); ((TextView) allowedCard.getChildAt(2)).setText("приложений");
+        LinearLayout todayCard = statCard("Сегодня"); todayValue = (TextView) todayCard.getChildAt(1); todayCaption = (TextView) todayCard.getChildAt(2);
+        allowedCard.setOnClickListener(v -> selectTab(1)); todayCard.setOnClickListener(v -> selectTab(2));
+        stats.addView(allowedCard, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams todayParams = new LinearLayout.LayoutParams(0, -2, 1); todayParams.leftMargin = dp(this, 10);
+        stats.addView(todayCard, todayParams);
+        page.addView(stats, margins(-1, -2, this, 12));
+
+        View pushHint = pushHint(); page.addView(pushHint, margins(-1, -2, this, 12));
+
+        TextView intro = text(this, "Интернет только у выбранных приложений.\nОдни правила для Wi‑Fi и мобильной сети.", 14, MUTED);
+        intro.setLineSpacing(0, 1.2f); page.addView(intro, margins(-1, -2, this, 18));
+        TextView choose = button(this, "Выбрать приложения  →", true);
+        page.addView(choose, margins(-1, dp(this, 54), this, 16)); choose.setOnClickListener(v -> selectTab(1));
+        TextView repair = button(this, "Восстановить соединение", false);
+        page.addView(repair, margins(-1, dp(this, 50), this, 10));
         repair.setOnClickListener(v -> {
-            if (Rules.enabled(this)) startForegroundService(new Intent(this, FirewallService.class).setAction(FirewallService.REPAIR));
+            if (Rules.enabled(this) && FirewallService.running) startForegroundService(new Intent(this, FirewallService.class).setAction(FirewallService.REPAIR));
             else Toast.makeText(this, "Сначала включите Firewall", Toast.LENGTH_SHORT).show();
         });
-        TextView help = text("Как это работает", 14, MUTED); help.setGravity(Gravity.CENTER); help.setPadding(0, dp(24), 0, dp(16));
+        TextView help = text(this, "Как это работает", 14, MUTED); help.setGravity(Gravity.CENTER); help.setPadding(0, dp(this, 18), 0, dp(this, 12));
         page.addView(help, new LinearLayout.LayoutParams(-1, -2)); help.setOnClickListener(v -> showHelp());
         return scroll;
     }
+    private LinearLayout statCard(String caption) {
+        LinearLayout card = column(this); card.setPadding(dp(this, 16), dp(this, 14), dp(this, 16), dp(this, 14));
+        card.setBackground(ripple(this, outlined(this, CARD, STROKE, R_CARD), R_CARD)); card.setClickable(true);
+        card.addView(label(this, caption));
+        TextView value = bold(this, "—", 24, WHITE); card.addView(value, margins(-2, -2, this, 8));
+        TextView sub = text(this, "", 12, MUTED); card.addView(sub, margins(-2, -2, this, 4));
+        return card;
+    }
+    /** Explains why pushes can be late and offers a one-tap, user-confirmed fix. Never auto-allows. */
+    private View pushHint() {
+        LinearLayout card = column(this); card.setPadding(dp(this, 16), dp(this, 14), dp(this, 16), dp(this, 14));
+        card.setBackground(outlined(this, 0xff1f2416, 0x40d4ff68, R_CARD));
+        LinearLayout head = row(this);
+        ImageView bell = new ImageView(this); bell.setImageDrawable(icon(this, R.drawable.ic_bell, 20, ACCENT));
+        head.addView(bell, new LinearLayout.LayoutParams(dp(this, 20), dp(this, 20)));
+        TextView title = bold(this, "Уведомления могут не приходить", 15, WHITE); title.setPadding(dp(this, 10), 0, 0, 0);
+        head.addView(title); card.addView(head);
+        TextView body = text(this, "Push почти всех приложений идут через Google Play services. Разреши им интернет, и уведомления разрешённых приложений будут приходить вовремя.", 13, MUTED);
+        body.setLineSpacing(0, 1.15f); card.addView(body, margins(-1, -2, this, 8));
+        LinearLayout actions = row(this);
+        TextView allow = button(this, "Разрешить", true); allow.setTextSize(13);
+        actions.addView(allow, new LinearLayout.LayoutParams(-2, dp(this, 38)));
+        allow.setPadding(dp(this, 18), 0, dp(this, 18), 0);
+        TextView later = text(this, "Скрыть", 13, MUTED); later.setGravity(Gravity.CENTER); later.setPadding(dp(this, 18), 0, dp(this, 18), 0);
+        actions.addView(later, new LinearLayout.LayoutParams(-2, dp(this, 38)));
+        card.addView(actions, margins(-1, -2, this, 12));
+        allow.setOnClickListener(v -> allowPushService());
+        later.setOnClickListener(v -> { Rules.prefs(this).edit().putBoolean("push_hint_hidden", true).apply(); updatePushHints(); });
+        pushHints.add(card); return card;
+    }
+    private String[] pushPackages() {
+        try {
+            PackageManager pm = getPackageManager();
+            String[] shared = pm.getPackagesForUid(pm.getApplicationInfo(Rules.PUSH_SERVICE, 0).uid);
+            return shared != null ? shared : new String[]{Rules.PUSH_SERVICE};
+        } catch (PackageManager.NameNotFoundException e) { return null; }
+    }
+    private void allowPushService() {
+        String[] packages = pushPackages(); if (packages == null) return;
+        allowed.addAll(Arrays.asList(packages)); rulesChanged();
+        Toast.makeText(this, "Google Play services: интернет разрешён", Toast.LENGTH_SHORT).show();
+    }
+    private void updatePushHints() {
+        boolean show = !Rules.prefs(this).getBoolean("push_hint_hidden", false) && pushPackages() != null && !allowed.contains(Rules.PUSH_SERVICE);
+        for (View v : pushHints) v.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
 
+    // ---------- Apps ----------
     private View buildAppsPage() {
-        LinearLayout page = column(); page.setPadding(dp(16), dp(14), dp(16), 0);
-        TextView title = text("Приложения", 24, WHITE); title.setTypeface(null, Typeface.BOLD); page.addView(title);
-        TextView subtitle = text("Отметь приложения с доступом в интернет", 13, MUTED);
-        subtitle.setPadding(0, dp(4), 0, dp(12)); page.addView(subtitle);
+        LinearLayout page = column(this); page.setPadding(dp(this, 16), dp(this, 18), dp(this, 16), 0);
+        TextView title = bold(this, "Приложения", 26, WHITE); page.addView(title);
+        TextView subtitle = text(this, "Отметь приложения с доступом в интернет", 13, MUTED);
+        page.addView(subtitle, margins(-1, -2, this, 6));
+        View hint = pushHint(); page.addView(hint, margins(-1, -2, this, 14));
+
+        LinearLayout searchBox = row(this); searchBox.setPadding(dp(this, 14), 0, dp(this, 6), 0);
+        searchBox.setBackground(outlined(this, CARD, STROKE, R_CONTROL));
+        ImageView glass = new ImageView(this); glass.setImageDrawable(icon(this, R.drawable.ic_search, 20, MUTED));
+        searchBox.addView(glass, new LinearLayout.LayoutParams(dp(this, 20), dp(this, 20)));
         search = new EditText(this); search.setId(R.id.app_search); search.setSingleLine(true); search.setTextSize(15); search.setTextColor(WHITE);
-        search.setHintTextColor(MUTED); search.setHint("Поиск приложений");
-        search.setPadding(dp(14), 0, dp(14), 0); search.setBackground(round(CARD, 12));
-        page.addView(search, new LinearLayout.LayoutParams(-1, dp(44)));
-        LinearLayout toolbar = new LinearLayout(this); toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        count = text("Загрузка…", 13, MUTED); count.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.addView(count, new LinearLayout.LayoutParams(0, dp(48), 1));
-        appFilter = new Spinner(this); appFilter.setId(R.id.app_filter); appFilter.setContentDescription("Фильтр приложений");
-        appFilter.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-            new String[]{"Все", "Обычные", "Системные"}));
-        toolbar.addView(appFilter, new LinearLayout.LayoutParams(dp(150), dp(48))); page.addView(toolbar);
-        ListView list = new ListView(this); list.setId(R.id.app_list); list.setDivider(null); list.setDividerHeight(dp(5));
+        search.setHintTextColor(MUTED); search.setHint("Поиск приложений"); search.setBackground(null);
+        search.setPadding(dp(this, 10), 0, dp(this, 4), 0); search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        searchBox.addView(search, new LinearLayout.LayoutParams(0, -1, 1));
+        TextView clear = text(this, "✕", 15, MUTED); clear.setGravity(Gravity.CENTER); clear.setContentDescription("Очистить поиск");
+        clear.setVisibility(View.GONE); clear.setOnClickListener(v -> search.setText(""));
+        searchBox.addView(clear, new LinearLayout.LayoutParams(dp(this, 36), -1));
+        search.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int c, int f) {}
+            public void onTextChanged(CharSequence s, int a, int b, int c) { clear.setVisibility(s.length() > 0 ? View.VISIBLE : View.GONE); }
+            public void afterTextChanged(Editable e) {}
+        });
+        page.addView(searchBox, margins(-1, dp(this, 48), this, 14));
+
+        appFilter = new ChipGroup(this, "Все", "Обычные", "Системные", "Разрешённые");
+        appFilter.setId(R.id.app_filter); appFilter.setContentDescription("Фильтр приложений");
+        page.addView(appFilter, margins(-1, -2, this, 12));
+
+        LinearLayout toolbar = row(this);
+        count = text(this, "Загрузка…", 12, MUTED);
+        toolbar.addView(count, new LinearLayout.LayoutParams(0, -2, 1));
+        allowedBadge = bold(this, "", 12, ACCENT); allowedBadge.setPadding(dp(this, 10), dp(this, 4), dp(this, 10), dp(this, 4));
+        allowedBadge.setBackground(round(this, ACCENT_SOFT, R_PILL)); toolbar.addView(allowedBadge);
+        page.addView(toolbar, margins(-1, -2, this, 12));
+
+        ListView list = new ListView(this); list.setId(R.id.app_list); list.setDivider(null); list.setDividerHeight(dp(this, 8));
+        list.setSelector(new android.graphics.drawable.ColorDrawable(0)); list.setClipToPadding(false);
+        list.setPadding(0, dp(this, 10), 0, dp(this, 12)); list.setVerticalScrollBarEnabled(false);
         list.setCacheColorHint(BG); adapter = new AppAdapter(); list.setAdapter(adapter);
         page.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
         return page;
     }
 
-    private Button navButton(String label, int icon, int tab) {
-        Button button = new Button(this); button.setText(label); button.setAllCaps(false); button.setTextSize(13);
-        button.setPadding(dp(8), dp(7), dp(8), dp(5)); button.setMinHeight(0); button.setMinimumHeight(0);
-        android.graphics.drawable.Drawable drawable = getDrawable(icon).mutate();
-        drawable.setBounds(0, 0, dp(22), dp(22));
-        button.setCompoundDrawables(null, drawable, null, null); button.setCompoundDrawablePadding(dp(3));
-        button.setContentDescription("Вкладка " + label);
+    // ---------- Navigation ----------
+    private LinearLayout navButton(String label, int icon, int tab) {
+        LinearLayout button = column(this); button.setGravity(Gravity.CENTER);
+        ImageView image = new ImageView(this); image.setImageDrawable(getDrawable(icon).mutate());
+        button.addView(image, new LinearLayout.LayoutParams(dp(this, 22), dp(this, 22)));
+        TextView text = bold(this, label, 12, MUTED); text.setGravity(Gravity.CENTER);
+        button.addView(text, margins(-2, -2, this, 4));
+        button.setContentDescription("Вкладка " + label); button.setClickable(true); button.setFocusable(true);
         button.setOnClickListener(v -> selectTab(tab)); return button;
     }
-
     private void selectTab(int tab) {
-        currentTab = tab >= 0 && tab <= 2 ? tab : 0;
+        int next = tab >= 0 && tab <= 2 ? tab : 0;
+        boolean changed = next != currentTab; currentTab = next;
         firewallPage.setVisibility(currentTab == 0 ? View.VISIBLE : View.GONE);
         appsPage.setVisibility(currentTab == 1 ? View.VISIBLE : View.GONE);
         trafficPage.setVisibility(currentTab == 2 ? View.VISIBLE : View.GONE);
+        if (changed) fadeIn(currentTab == 0 ? firewallPage : currentTab == 1 ? appsPage : trafficPage);
         styleTab(firewallTab, currentTab == 0); styleTab(appsTab, currentTab == 1); styleTab(trafficTab, currentTab == 2);
         if (resumed && currentTab == 2) trafficPage.resume(); else trafficPage.pause();
         Rules.prefs(this).edit().putInt("tab", currentTab).apply();
@@ -166,10 +272,11 @@ public class MainActivity extends Activity {
             keyboard.hideSoftInputFromWindow(search.getWindowToken(), 0);
         }
     }
-    private void styleTab(Button tab, boolean selected) {
-        tab.setSelected(selected); tab.setTextColor(selected ? ACCENT : MUTED);
-        tab.setBackground(round(selected ? CARD : Color.TRANSPARENT, 14));
-        tab.getCompoundDrawables()[1].setTint(selected ? ACCENT : MUTED);
+    private void styleTab(LinearLayout tab, boolean selected) {
+        tab.setSelected(selected);
+        tab.setBackground(ripple(this, round(this, selected ? ACCENT_SOFT : 0, 20), 20));
+        ((ImageView) tab.getChildAt(0)).getDrawable().setTint(selected ? ACCENT : MUTED);
+        ((TextView) tab.getChildAt(1)).setTextColor(selected ? ACCENT : MUTED);
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putInt("tab", currentTab); state.putString("query", search.getText().toString());
@@ -189,16 +296,20 @@ public class MainActivity extends Activity {
         resumed = true;
         if (currentTab == 2) trafficPage.resume();
         allowed = Rules.allowed(this);
-        if (Rules.enabled(this) && !FirewallService.running) {
+        if (Rules.enabled(this) && !Rules.interrupted(this) && !FirewallService.running) {
             if (VpnService.prepare(this) == null) startFirewall();
-            else Rules.enabled(this, false);
+            else { Rules.interrupted(this, true); FirewallService.error = "Нет разрешения на VPN. Включите firewall ещё раз."; }
         }
-        updateStatus(); loadApps();
+        updateStatus(); loadApps(); loadToday();
     }
 
     private void requestStart() {
         Intent consent = VpnService.prepare(this);
-        if (consent != null) { startActivityForResult(consent, 10); return; }
+        if (consent != null) {
+            try { startActivityForResult(consent, 10); }
+            catch (ActivityNotFoundException e) { FirewallService.error = "Android не показал окно разрешения VPN."; updateStatus(); }
+            return;
+        }
         startFirewall();
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
@@ -208,23 +319,53 @@ public class MainActivity extends Activity {
     private void startFirewall() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 20);
-        Rules.enabled(this, true);
+        Rules.enabled(this, true); Rules.interrupted(this, false);
         FirewallService.error = "";
         try { startForegroundService(new Intent(this, FirewallService.class).setAction(FirewallService.START)); }
         catch (RuntimeException e) { Rules.enabled(this, false); FirewallService.error = "Не удалось запустить firewall."; }
         updateStatus();
     }
     private void stopFirewall() {
-        Rules.enabled(this, false); FirewallService.error = "";
+        Rules.enabled(this, false); Rules.interrupted(this, false); FirewallService.error = "";
         startService(new Intent(this, FirewallService.class).setAction(FirewallService.STOP)); updateStatus();
     }
+    private boolean desired() { return Rules.enabled(this) && !Rules.interrupted(this); }
     private void updateStatus() {
-        binding = true;
-        boolean desired = Rules.enabled(this);
-        power.setChecked(desired); binding = false;
+        boolean desired = desired(), on = desired && FirewallService.running && !FirewallService.updating;
         String error = FirewallService.error;
         status.setText(!error.isEmpty() ? error : desired ? (FirewallService.updating ? "Применение правил…" : FirewallService.running ? "Включён · остальные приложения без интернета" : "Запуск…") : "Выключен · доступ есть у всех приложений");
-        status.setTextColor(!error.isEmpty() ? Color.rgb(255,172,140) : desired ? ACCENT : MUTED);
+        status.setTextColor(!error.isEmpty() ? DANGER : desired ? ACCENT : MUTED);
+        stateTitle.setText(desired ? (FirewallService.running ? "Защита включена" : "Включение…") : "Защита выключена");
+        int tone = desired ? ACCENT : !error.isEmpty() ? DANGER : FAINT;
+        GradientDrawable ring = new GradientDrawable(); ring.setShape(GradientDrawable.OVAL);
+        ring.setColor(desired ? 0xff20271a : CARD_HI); ring.setStroke(dp(this, 3), tone);
+        heroRing.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x33ffffff), ring, null));
+        GradientDrawable halo = new GradientDrawable(); halo.setShape(GradientDrawable.OVAL);
+        halo.setGradientType(GradientDrawable.RADIAL_GRADIENT); halo.setGradientRadius(dp(this, 105));
+        halo.setColors(new int[]{(tone & 0x00ffffff) | (desired ? 0x66000000 : 0x22000000), (tone & 0x00ffffff)});
+        heroHalo.setBackground(halo);
+        heroIcon.setImageDrawable(icon(this, desired ? R.drawable.ic_shield : R.drawable.ic_power, 64, desired ? ACCENT : WHITE));
+        if (desired) heroIcon.getDrawable().setTintList(null);
+        heroRing.setContentDescription("Firewall " + (desired ? "включён, нажмите, чтобы выключить" : "выключен, нажмите, чтобы включить"));
+        if (on && !pulse.isStarted()) pulse.start();
+        else if (!on && pulse.isStarted()) { pulse.cancel(); heroHalo.setScaleX(1); heroHalo.setScaleY(1); heroHalo.setAlpha(desired ? .8f : .5f); }
+        updatePushHints();
+    }
+    private void loadToday() {
+        loader.execute(() -> {
+            boolean access = TrafficMonitor.hasAccess(this);
+            long total = -1;
+            if (access) {
+                TrafficMonitor.Snapshot today = TrafficMonitor.read(this, TrafficMonitor.startOfPeriod(0), System.currentTimeMillis());
+                if (today.networks > 0) total = today.rx + today.tx;
+            }
+            long value = total;
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                todayValue.setText(value >= 0 ? TrafficMonitor.format(value) : "—");
+                todayCaption.setText(access ? "трафик устройства" : "нет доступа к статистике");
+            });
+        });
     }
 
     private void loadApps() {
@@ -260,29 +401,39 @@ public class MainActivity extends Activity {
     private void filter() {
         String q = search.getText().toString().trim().toLowerCase(Locale.ROOT);
         visible.clear(); int n = 0;
+        int mode = appFilter.getSelectedItemPosition();
         for (AppGroup g : all) {
             boolean selected = selected(g); if (selected) n++;
-            int mode = appFilter.getSelectedItemPosition();
-            boolean included = mode == 0 || (mode == 1 ? (g.user || g.launchable) : !g.user);
+            boolean included = mode == 0 || (mode == 1 ? (g.user || g.launchable) : mode == 2 ? !g.user : selected);
             if (included && (g.label + " " + g.details).toLowerCase(Locale.ROOT).contains(q)) visible.add(g);
         }
         count.setText("В списке: " + visible.size() + " / " + all.size());
-        allowedSummary.setText("Разрешено приложений: " + n); adapter.notifyDataSetChanged();
+        allowedBadge.setText("Разрешено: " + n);
+        allowedValue.setText(String.valueOf(all.isEmpty() ? countAllowedPackages() : n));
+        adapter.notifyDataSetChanged();
+    }
+    private int countAllowedPackages() {
+        HashSet<Integer> uids = new HashSet<>();
+        for (String p : allowed) try { uids.add(getPackageManager().getApplicationInfo(p, 0).uid); } catch (PackageManager.NameNotFoundException ignored) {}
+        return uids.size();
     }
 
     private void toggle(AppGroup g, boolean checked) {
         if (checked) allowed.addAll(g.packages); else allowed.removeAll(g.packages);
+        rulesChanged();
+    }
+    private void rulesChanged() {
         Rules.save(this, allowed);
-        if (Rules.enabled(this)) {
+        if (Rules.enabled(this) && FirewallService.running) {
             try { startForegroundService(new Intent(this, FirewallService.class).setAction(FirewallService.UPDATE)); }
-            catch (RuntimeException e) { FirewallService.error = "Правила не обновлены. Перезапустите firewall."; updateStatus(); }
+            catch (RuntimeException e) { FirewallService.error = "Правила не обновлены. Перезапустите firewall."; }
         }
-        filter();
+        filter(); updateStatus();
     }
 
     private void showHelp() {
         new AlertDialog.Builder(this).setTitle("SimpleFirewall")
-            .setMessage("Отметьте приложения и включите firewall. Новые приложения по умолчанию заблокированы. Настройки сохраняются.\n\nРаботает локально через VPN Android, без серверов, рекламы и сбора данных. Другой VPN одновременно использовать нельзя.\n\nПо умолчанию показаны все приложения с разрешением на сеть. Фильтр «Обычные» включает предустановленные приложения с иконкой запуска. Поиск не меняет выбранный фильтр. У приложений с общим UID доступ общий — они объединены в одну строку. Для push-уведомлений могут понадобиться сервисы Google.\n\nФильтруется трафик приложений текущего профиля, IPv4 и IPv6. Раздача интернета и другие профили не фильтруются.\n\nЕсли Android остановит службу, блокировка прекратится. Режим «Блокировать соединения без VPN» с этой версией несовместим: выбранные приложения выходят в интернет напрямую.\n\nПосле перезагрузки телефона откройте приложение для возобновления работы.")
+            .setMessage("Отметьте приложения и включите firewall. Новые приложения по умолчанию заблокированы. Настройки сохраняются.\n\nРаботает локально через VPN Android, без серверов, рекламы и сбора данных. Самому приложению интернет не нужен. Другой VPN одновременно использовать нельзя: если он займёт место, придёт уведомление «Firewall OFF» с кнопкой включения.\n\nPush-уведомления большинства приложений доставляют Google Play services. Если они заблокированы, уведомления разрешённых приложений могут не приходить.\n\nУ приложений с общим UID доступ общий — они объединены в одну строку. Фильтруется трафик приложений текущего профиля, IPv4 и IPv6. Раздача интернета и другие профили не фильтруются.\n\nПосле перезагрузки firewall включается сам, если был включён. Для надёжности можно выбрать SimpleFirewall как «Постоянную VPN» в настройках Android. Режим «Блокировать соединения без VPN» несовместим: выбранные приложения выходят в интернет напрямую.")
             .setPositiveButton("Понятно", null).show();
     }
 
@@ -293,33 +444,34 @@ public class MainActivity extends Activity {
         @Override public View getView(int position, View recycled, android.view.ViewGroup parent) {
             Row row;
             if (recycled == null) {
-                row = new Row(); LinearLayout box = new LinearLayout(MainActivity.this); box.setGravity(Gravity.CENTER_VERTICAL);
-                box.setPadding(dp(10), dp(9), dp(8), dp(9)); box.setBackground(round(CARD, 14));
-                row.icon = new ImageView(MainActivity.this); box.addView(row.icon, new LinearLayout.LayoutParams(dp(36), dp(36)));
-                LinearLayout labels = column(); labels.setPadding(dp(12), 0, dp(8), 0);
-                row.title = text("", 15, WHITE); row.title.setMaxLines(2); row.title.setEllipsize(TextUtils.TruncateAt.END); labels.addView(row.title);
-                row.detail = text("", 11, MUTED); row.detail.setSingleLine(); row.detail.setEllipsize(TextUtils.TruncateAt.MIDDLE); labels.addView(row.detail);
+                row = new Row(); LinearLayout box = row(MainActivity.this);
+                box.setPadding(dp(MainActivity.this, 12), dp(MainActivity.this, 12), dp(MainActivity.this, 14), dp(MainActivity.this, 12));
+                row.icon = new ImageView(MainActivity.this); box.addView(row.icon, new LinearLayout.LayoutParams(dp(MainActivity.this, 40), dp(MainActivity.this, 40)));
+                LinearLayout labels = column(MainActivity.this); labels.setPadding(dp(MainActivity.this, 14), 0, dp(MainActivity.this, 10), 0);
+                row.title = bold(MainActivity.this, "", 15, WHITE); row.title.setMaxLines(2); row.title.setEllipsize(TextUtils.TruncateAt.END); labels.addView(row.title);
+                row.detail = text(MainActivity.this, "", 11, MUTED); row.detail.setSingleLine(); row.detail.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                labels.addView(row.detail, margins(-1, -2, MainActivity.this, 4));
                 box.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
-                row.check = new CheckBox(MainActivity.this); row.check.setClickable(false); row.check.setFocusable(false); row.check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO); box.addView(row.check);
+                row.check = new ImageView(MainActivity.this); int pad = dp(MainActivity.this, 3); row.check.setPadding(pad, pad, pad, pad);
+                row.check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                box.addView(row.check, new LinearLayout.LayoutParams(dp(MainActivity.this, 26), dp(MainActivity.this, 26)));
                 box.setTag(row); recycled = box;
             } else row = (Row) recycled.getTag();
-            AppGroup g = visible.get(position); row.title.setText(g.label); row.detail.setText(g.details);
-            row.icon.setImageDrawable(g.info.loadIcon(getPackageManager())); row.check.setChecked(selected(g));
-            recycled.setContentDescription(g.label + (selected(g) ? ", интернет разрешён" : ", интернет запрещён"));
+            AppGroup g = visible.get(position); boolean on = selected(g);
+            row.title.setText(g.label); row.detail.setText(g.details);
+            icons.load(row.icon, g.info.packageName);
+            row.check.setBackground(on ? round(MainActivity.this, ACCENT, 8) : outlined(MainActivity.this, 0, FAINT, 8));
+            row.check.setImageDrawable(on ? icon(MainActivity.this, R.drawable.ic_check, 20, ON_ACCENT) : null);
+            recycled.setBackground(ripple(MainActivity.this, on ? outlined(MainActivity.this, 0xff1f2519, 0x40d4ff68, 16) : round(MainActivity.this, CARD, 16), 16));
+            recycled.setContentDescription(g.label + (on ? ", интернет разрешён" : ", интернет запрещён"));
             recycled.setOnClickListener(v -> toggle(g, !selected(g))); return recycled;
         }
     }
-    private static class Row { ImageView icon; TextView title, detail; CheckBox check; }
+    private static class Row { ImageView icon, check; TextView title, detail; }
     private static class AppGroup {
         final ArrayList<String> packages = new ArrayList<>(); final TreeSet<String> labels = new TreeSet<>();
         String label, details; boolean user, network, launchable; ApplicationInfo info;
     }
-    private LinearLayout column() { LinearLayout v = new LinearLayout(this); v.setOrientation(LinearLayout.VERTICAL); return v; }
-    private TextView text(String value, int size, int color) {
-        TextView v = new TextView(this); v.setText(value); v.setTextSize(size); v.setTextColor(color); return v;
-    }
-    private GradientDrawable round(int color, int radius) { GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(radius)); return d; }
-    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     @Override protected void onPause() { resumed = false; trafficPage.pause(); super.onPause(); }
-    @Override protected void onDestroy() { trafficPage.close(); unregisterReceiver(updates); loader.shutdown(); super.onDestroy(); }
+    @Override protected void onDestroy() { pulse.cancel(); trafficPage.close(); unregisterReceiver(updates); loader.shutdown(); super.onDestroy(); }
 }

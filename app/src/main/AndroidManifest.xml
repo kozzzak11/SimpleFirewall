@@ -1,7 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <permission android:name="com.kozzzak.simplefirewall.INTERNAL" android:protectionLevel="signature" />
     <uses-permission android:name="com.kozzzak.simplefirewall.INTERNAL" />
-    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- No INTERNET: the app itself never opens a socket. The VPN sink, the
+         traffic counters (NetworkStatsManager/TrafficStats) and speed estimate
+         work without network access. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- User grants usage access in Android Settings; needed only for per-app traffic. -->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
@@ -12,7 +15,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application android:label="SimpleFirewall" android:icon="@drawable/ic_shield"
         android:theme="@style/AppTheme" android:allowBackup="false" android:supportsRtl="true">
-        <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize|stateAlwaysHidden">
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize|stateAlwaysHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -21,9 +24,15 @@
         <service android:name=".FirewallService" android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false" android:foregroundServiceType="specialUse">
             <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
-            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="false" />
+            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="true" />
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-controlled local firewall dropping traffic from unselected applications" />
         </service>
+        <receiver android:name=".BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

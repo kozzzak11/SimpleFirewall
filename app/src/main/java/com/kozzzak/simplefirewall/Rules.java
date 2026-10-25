@@ -34,4 +34,9 @@ final class Rules {
     }
     static boolean enabled(Context c) { return prefs(c).getBoolean("enabled", false); }
     static void enabled(Context c, boolean value) { prefs(c).edit().putBoolean("enabled", value).commit(); }
+    /** The user wants the firewall on, but Android or another VPN switched it off. */
+    static boolean interrupted(Context c) { return prefs(c).getBoolean("interrupted", false); }
+    static void interrupted(Context c, boolean value) { prefs(c).edit().putBoolean("interrupted", value).commit(); }
+    /** Google Play services: delivers FCM push messages for most apps. */
+    static final String PUSH_SERVICE = "com.google.android.gms";
 }

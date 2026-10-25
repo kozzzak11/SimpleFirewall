@@ -2,6 +2,7 @@ name: Build and test APK
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 permissions:
@@ -58,7 +59,7 @@ jobs:
         run: cp app/build/outputs/apk/debug/app-debug.apk SimpleFirewall.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: SimpleFirewall-APK
+          name: SimpleFirewall-debug-APK
           path: SimpleFirewall.apk
           retention-days: 90
       - name: Upload test reports
@@ -70,12 +71,71 @@ jobs:
             app/build/reports/
             app/build/outputs/androidTest-results/
             app/build/ui/
-      - name: Publish APK download
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+  # Signed, non-debuggable release. Runs only for version tags, after the
+  # emulator verification passed. Existing releases are never overwritten.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Check tag matches versionName
+        run: |
+          VERSION=$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle)
+          test -n "$VERSION"
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then echo "::error::Tag $GITHUB_REF_NAME does not match versionName $VERSION"; exit 1; fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      # The release key lives only in repository secrets.
+      - name: Signing key
+        env:
+          SF_KEYSTORE_BASE64: ${{ secrets.SF_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$SF_KEYSTORE_BASE64" ]; then echo "::error::SF_KEYSTORE_BASE64 secret missing"; exit 1; fi
+          umask 077
+          printf '%s' "$SF_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.p12"
+          echo "SF_KEYSTORE=$RUNNER_TEMP/release.p12" >> "$GITHUB_ENV"
+      - name: Build signed release
+        env:
+          SF_KEYSTORE_PASSWORD: ${{ secrets.SF_KEYSTORE_PASSWORD }}
+          SF_KEY_ALIAS: ${{ secrets.SF_KEY_ALIAS }}
+          SF_KEY_PASSWORD: ${{ secrets.SF_KEY_PASSWORD }}
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Remove signing key from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.p12"
+      - name: Verify signature and build type
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          # Updates must install over existing installs: the certificate has to stay the same.
+          EXPECTED=a2127a4d29057febefbbd27c6aa6fbd571e67205fda5d147769e140c0c19803c
+          ACTUAL=$("$BT/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then echo "::error::Unexpected signing certificate $ACTUAL"; exit 1; fi
+          if "$BT/aapt" dump badging "$APK" | grep -q "application-debuggable"; then echo "::error::Release APK is debuggable"; exit 1; fi
+          cp "$APK" SimpleFirewall.apk
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view v1.2.0 >/dev/null 2>&1 || gh release create v1.2.0 --target "$GITHUB_SHA" --title 'SimpleFirewall 1.2.0' --notes 'Traffic monitoring, consistent complete application list and more stable VPN rule updates. Verified on Android 15 emulator. Development signing certificate.'
-          gh release upload v1.2.0 SimpleFirewall.apk --clobber
-    permissions:
-      contents: write
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $GITHUB_REF_NAME already exists; refusing to overwrite. Bump the version."
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" SimpleFirewall.apk --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "SimpleFirewall $VERSION" --latest \
+            --notes "Signed release APK (stable key). Verified on Android 15 emulator in GitHub Actions."
