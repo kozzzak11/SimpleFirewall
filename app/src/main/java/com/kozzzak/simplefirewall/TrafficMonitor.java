@@ -59,11 +59,13 @@ final class TrafficMonitor {
         if (result.networks == 0) result.error = "Не удалось получить статистику Android";
         return result;
     }
+    /** Standard decimal units, as in Android Settings: 1 KB = 1000 B. */
     static String format(long bytes) {
         if (bytes < 0) return "—";
-        if (bytes < 1024) return bytes + " Б";
-        double n = bytes; String[] units = {"Б", "КиБ", "МиБ", "ГиБ", "ТиБ"}; int unit = 0;
-        while (n >= 1024 && unit < units.length - 1) { n /= 1024; unit++; }
-        return String.format(Locale.getDefault(), n < 10 ? "%.1f %s" : "%.0f %s", n, units[unit]);
+        if (bytes < 1000) return bytes + " B";
+        double n = bytes; String[] units = {"B", "KB", "MB", "GB", "TB"}; int unit = 0;
+        while (n >= 999.5 && unit < units.length - 1) { n /= 1000; unit++; }
+        return String.format(Locale.US, n < 9.95 ? "%.1f %s" : "%.0f %s", n, units[unit]);
     }
+    static String speed(long bytesPerSecond) { return format(bytesPerSecond) + "/s"; }
 }

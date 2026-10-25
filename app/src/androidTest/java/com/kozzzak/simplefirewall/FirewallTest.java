@@ -163,7 +163,7 @@ public class FirewallTest {
         long loadedBy = System.currentTimeMillis() + 10000;
         do {
             instrumentation.runOnMainSync(() -> {
-                android.widget.Spinner filter = screen.findViewById(R.id.app_filter);
+                ChipGroup filter = screen.findViewById(R.id.app_filter);
                 assertEquals("Default list must include system apps", 0, filter.getSelectedItemPosition());
                 android.widget.ListView list = screen.findViewById(R.id.app_list);
                 java.util.Set<Long> ids = new java.util.HashSet<>();
@@ -186,14 +186,14 @@ public class FirewallTest {
             search.setText(query);
             android.widget.ListView list = screen.findViewById(R.id.app_list);
             assertTrue("Search must find system app in All", list.getCount() > 0);
-            ((android.widget.Spinner) screen.findViewById(R.id.app_filter)).setSelection(1);
+            ((ChipGroup) screen.findViewById(R.id.app_filter)).setSelection(1);
         });
         instrumentation.waitForIdleSync();
         Thread.sleep(500);
         instrumentation.runOnMainSync(() -> {
             android.widget.ListView list = screen.findViewById(R.id.app_list);
             assertEquals("Search must not override Ordinary filter", 0, list.getCount());
-            ((android.widget.Spinner) screen.findViewById(R.id.app_filter)).setSelection(0);
+            ((ChipGroup) screen.findViewById(R.id.app_filter)).setSelection(0);
             ((android.widget.EditText) screen.findViewById(R.id.app_search)).setText("");
         });
     }
