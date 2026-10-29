@@ -8,6 +8,7 @@ import android.content.pm.*;
 import android.graphics.drawable.GradientDrawable;
 import android.net.VpnService;
 import android.os.*;
+import android.provider.Settings;
 import android.text.*;
 import android.view.*;
 import android.view.animation.AccelerateDecelerateInterpolator;
@@ -29,6 +30,9 @@ public class MainActivity extends Activity {
     private final ArrayList<View> pushHints = new ArrayList<>();
     private LinearLayout firewallTab, appsTab, trafficTab;
     private TrafficPage trafficPage;
+    private Switch adblockSwitch;
+    private TextView adblockMeta, adblockHint;
+    private boolean adblockGuard, pendingAdblock;
     private boolean resumed;
     private int currentTab = -1;
     private EditText search;
@@ -74,7 +78,9 @@ public class MainActivity extends Activity {
         if (state != null) {
             search.setText(state.getString("query", ""));
             appFilter.setSelection(state.getInt("filter", 0));
+            pendingAdblock = state.getBoolean("pending_adblock");
         }
+        loader.execute(() -> Blocklist.ensure(this));
         selectTab(state != null ? state.getInt("tab", 0) : Rules.prefs(this).getInt("tab", 0));
         appFilter.setListener(position -> filter());
         search.addTextChangedListener(new TextWatcher() {
@@ -89,7 +95,8 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); handleIntent(intent); }
     private void handleIntent(Intent intent) {
         if (intent != null && FirewallService.ENABLE.equals(intent.getAction())) {
-            setIntent(new Intent(this, MainActivity.class)); selectTab(0); requestStart();
+            setIntent(new Intent(this, MainActivity.class)); selectTab(0);
+            if (Rules.enabled(this) || !Rules.adblock(this)) requestStart(); else applyAdblock(true);
         }
     }
 
@@ -139,6 +146,7 @@ public class MainActivity extends Activity {
         page.addView(stats, margins(-1, -2, this, 12));
 
         View pushHint = pushHint(); page.addView(pushHint, margins(-1, -2, this, 12));
+        page.addView(adblockCard(), margins(-1, -2, this, 12));
 
         TextView intro = text(this, "Интернет только у выбранных приложений.\nОдни правила для Wi‑Fi и мобильной сети.", 14, MUTED);
         intro.setLineSpacing(0, 1.2f); page.addView(intro, margins(-1, -2, this, 18));
@@ -183,6 +191,109 @@ public class MainActivity extends Activity {
         allow.setOnClickListener(v -> allowPushService());
         later.setOnClickListener(v -> { Rules.prefs(this).edit().putBoolean("push_hint_hidden", true).apply(); updatePushHints(); });
         pushHints.add(card); return card;
+    }
+    /** Separate from the shield: off leaves every existing firewall path unchanged. */
+    private View adblockCard() {
+        LinearLayout card = column(this);
+        card.setPadding(dp(this, 16), dp(this, 14), dp(this, 16), dp(this, 14));
+        card.setBackground(outlined(this, CARD, STROKE, R_CARD));
+        LinearLayout head = row(this);
+        ImageView mark = new ImageView(this); mark.setImageDrawable(icon(this, R.drawable.ic_block, 22, ACCENT));
+        head.addView(mark, new LinearLayout.LayoutParams(dp(this, 22), dp(this, 22)));
+        LinearLayout titles = column(this); titles.setPadding(dp(this, 10), 0, dp(this, 8), 0);
+        titles.addView(bold(this, "Блокировка рекламы", 16, WHITE));
+        TextView sub = text(this, "Реклама и трекеры во всех приложениях и браузерах. Обычные сайты открываются как обычно.", 13, MUTED);
+        sub.setLineSpacing(0, 1.15f);
+        titles.addView(sub, margins(-1, -2, this, 4));
+        head.addView(titles, new LinearLayout.LayoutParams(0, -2, 1));
+        adblockSwitch = new Switch(this); adblockSwitch.setId(R.id.adblock_switch);
+        adblockSwitch.setContentDescription("Блокировка рекламы");
+        int[][] states = {new int[]{android.R.attr.state_checked}, new int[]{}};
+        adblockSwitch.setThumbTintList(new android.content.res.ColorStateList(states, new int[]{ACCENT, 0xffc5cec0}));
+        adblockSwitch.setTrackTintList(new android.content.res.ColorStateList(states, new int[]{0x66d4ff68, 0x33ffffff}));
+        head.addView(adblockSwitch);
+        card.addView(head);
+        adblockMeta = text(this, "Выключена", 12, MUTED);
+        card.addView(adblockMeta, margins(-1, -2, this, 10));
+        TextView update = button(this, "Обновить список", false); update.setTextSize(13);
+        update.setOnClickListener(v -> refreshBlocklist(update));
+        card.addView(update, margins(-1, dp(this, 40), this, 12));
+        adblockHint = text(this, "Частный DNS указывает на свой сервер. Выключите его в настройках Android — иначе фильтр не увидит запросы.", 12, DANGER);
+        adblockHint.setLineSpacing(0, 1.15f); adblockHint.setVisibility(View.GONE);
+        adblockHint.setOnClickListener(v -> openPrivateDns());
+        card.addView(adblockHint, margins(-1, -2, this, 10));
+        adblockSwitch.setOnCheckedChangeListener((b, checked) -> {
+            if (adblockGuard) return;
+            if (checked) requestAdblock(); else applyAdblock(false);
+        });
+        return card;
+    }
+    private final Runnable adblockTick = new Runnable() {
+        @Override public void run() {
+            if (isDestroyed()) return;
+            paintAdblock();
+            if (resumed && Rules.adblock(MainActivity.this)) status.postDelayed(this, 1000);
+        }
+    };
+    private void paintAdblock() {
+        if (adblockSwitch == null) return;
+        boolean on = Rules.adblock(this);
+        adblockGuard = true; adblockSwitch.setChecked(on); adblockGuard = false;
+        if (!on) { adblockMeta.setText("Выключена"); adblockHint.setVisibility(View.GONE); return; }
+        adblockMeta.setText("Заблокировано: " + PacketTunnel.blockedQueries.get() + "  ·  " + Blocklist.count() + " доменов, " + Blocklist.origin());
+        adblockHint.setVisibility(privateDnsStrict() ? View.VISIBLE : View.GONE);
+    }
+    private void scheduleAdblockTick() {
+        status.removeCallbacks(adblockTick);
+        if (resumed && Rules.adblock(this)) status.postDelayed(adblockTick, 1000);
+    }
+    private boolean privateDnsStrict() {
+        return "hostname".equals(Settings.Global.getString(getContentResolver(), "private_dns_mode"));
+    }
+    private void openPrivateDns() {
+        try { startActivity(new Intent("android.settings.PRIVATE_DNS_SETTINGS")); }
+        catch (ActivityNotFoundException e) {
+            try { startActivity(new Intent(Settings.ACTION_WIRELESS_SETTINGS)); }
+            catch (ActivityNotFoundException ignored) { /* the hint text is enough */ }
+        }
+    }
+    private void requestAdblock() {
+        Intent consent = VpnService.prepare(this);
+        if (consent != null) {
+            pendingAdblock = true;
+            try { startActivityForResult(consent, 11); }
+            catch (ActivityNotFoundException e) {
+                pendingAdblock = false;
+                FirewallService.error = "Android не показал окно разрешения VPN.";
+                updateStatus();
+            }
+            return;
+        }
+        applyAdblock(true);
+    }
+    private void applyAdblock(boolean on) {
+        Rules.adblock(this, on);
+        if (on) Rules.interrupted(this, false);
+        try {
+            if (on || Rules.enabled(this)) startForegroundService(new Intent(this, FirewallService.class).setAction(FirewallService.FILTER));
+            else startService(new Intent(this, FirewallService.class).setAction(FirewallService.STOP));
+        } catch (RuntimeException e) {
+            Rules.adblock(this, false);
+            FirewallService.error = "Не удалось запустить блокировку рекламы.";
+        }
+        updateStatus();
+    }
+    private void refreshBlocklist(TextView button) {
+        button.setEnabled(false); button.setText("Обновление…");
+        loader.execute(() -> {
+            String msg = Blocklist.update(this);
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                button.setEnabled(true); button.setText("Обновить список");
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+                paintAdblock();
+            });
+        });
     }
     private String[] pushPackages() {
         try {
@@ -280,7 +391,8 @@ public class MainActivity extends Activity {
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putInt("tab", currentTab); state.putString("query", search.getText().toString());
-        state.putInt("filter", appFilter.getSelectedItemPosition()); super.onSaveInstanceState(state);
+        state.putInt("filter", appFilter.getSelectedItemPosition()); state.putBoolean("pending_adblock", pendingAdblock);
+        super.onSaveInstanceState(state);
     }
 
     @android.annotation.SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -299,6 +411,8 @@ public class MainActivity extends Activity {
         if (Rules.enabled(this) && !Rules.interrupted(this) && !FirewallService.running) {
             if (VpnService.prepare(this) == null) startFirewall();
             else { Rules.interrupted(this, true); FirewallService.error = "Нет разрешения на VPN. Включите firewall ещё раз."; }
+        } else if (Rules.adblock(this) && !Rules.interrupted(this) && !FirewallService.running && VpnService.prepare(this) == null) {
+            applyAdblock(true);
         }
         updateStatus(); loadApps(); loadToday();
     }
@@ -314,6 +428,7 @@ public class MainActivity extends Activity {
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == 11) { pendingAdblock = false; if (result == RESULT_OK) applyAdblock(true); else updateStatus(); return; }
         if (request == 10 && result == RESULT_OK) startFirewall(); else updateStatus();
     }
     private void startFirewall() {
@@ -350,6 +465,8 @@ public class MainActivity extends Activity {
         if (on && !pulse.isStarted()) pulse.start();
         else if (!on && pulse.isStarted()) { pulse.cancel(); heroHalo.setScaleX(1); heroHalo.setScaleY(1); heroHalo.setAlpha(desired ? .8f : .5f); }
         updatePushHints();
+        paintAdblock();
+        scheduleAdblockTick();
     }
     private void loadToday() {
         loader.execute(() -> {
@@ -433,7 +550,7 @@ public class MainActivity extends Activity {
 
     private void showHelp() {
         new AlertDialog.Builder(this).setTitle("SimpleFirewall")
-            .setMessage("Отметьте приложения и включите firewall. Новые приложения по умолчанию заблокированы. Настройки сохраняются.\n\nРаботает локально через VPN Android, без серверов, рекламы и сбора данных. Самому приложению интернет не нужен. Другой VPN одновременно использовать нельзя: если он займёт место, придёт уведомление «Firewall OFF» с кнопкой включения.\n\nPush-уведомления большинства приложений доставляют Google Play services. Если они заблокированы, уведомления разрешённых приложений могут не приходить.\n\nУ приложений с общим UID доступ общий — они объединены в одну строку. Фильтруется трафик приложений текущего профиля, IPv4 и IPv6. Раздача интернета и другие профили не фильтруются.\n\nПосле перезагрузки firewall включается сам, если был включён. Для надёжности можно выбрать SimpleFirewall как «Постоянную VPN» в настройках Android. Режим «Блокировать соединения без VPN» несовместим: выбранные приложения выходят в интернет напрямую.")
+            .setMessage("Отметьте приложения и включите firewall. Новые приложения по умолчанию заблокированы. Настройки сохраняются.\n\nРаботает локально через VPN Android, без серверов, рекламы и сбора данных. Самому приложению интернет не нужен. Другой VPN одновременно использовать нельзя: если он займёт место, придёт уведомление «Firewall OFF» с кнопкой включения.\n\nPush-уведомления большинства приложений доставляют Google Play services. Если они заблокированы, уведомления разрешённых приложений могут не приходить.\n\nУ приложений с общим UID доступ общий — они объединены в одну строку. Фильтруется трафик приложений текущего профиля, IPv4 и IPv6. Раздача интернета и другие профили не фильтруются.\n\nПосле перезагрузки firewall включается сам, если был включён. Для надёжности можно выбрать SimpleFirewall как «Постоянную VPN» в настройках Android. Режим «Блокировать соединения без VPN» несовместим: выбранные приложения выходят в интернет напрямую.\n\nБлокировка рекламы — отдельный переключатель, по умолчанию выключен. Рекламные домены получают пустой адрес, остальные DNS-запросы проходят как обычно. Список StevenBlack уже в приложении. Рекламу YouTube и Instagram DNS не отличает: она идёт с того же домена, что и само видео. Частный DNS с указанием сервера нужно выключить, иначе Android обходит фильтр.")
             .setPositiveButton("Понятно", null).show();
     }
 
@@ -472,6 +589,6 @@ public class MainActivity extends Activity {
         final ArrayList<String> packages = new ArrayList<>(); final TreeSet<String> labels = new TreeSet<>();
         String label, details; boolean user, network, launchable; ApplicationInfo info;
     }
-    @Override protected void onPause() { resumed = false; trafficPage.pause(); super.onPause(); }
+    @Override protected void onPause() { resumed = false; status.removeCallbacks(adblockTick); trafficPage.pause(); super.onPause(); }
     @Override protected void onDestroy() { pulse.cancel(); trafficPage.close(); unregisterReceiver(updates); loader.shutdown(); super.onDestroy(); }
 }

@@ -3,5 +3,6 @@
     <item type="id" name="app_search" />
     <item type="id" name="app_filter" />
     <item type="id" name="power_button" />
+    <item type="id" name="adblock_switch" />
     <item type="id" name="icon_tag" />
 </resources>

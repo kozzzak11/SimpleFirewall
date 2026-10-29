@@ -1,9 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <permission android:name="com.kozzzak.simplefirewall.INTERNAL" android:protectionLevel="signature" />
     <uses-permission android:name="com.kozzzak.simplefirewall.INTERNAL" />
-    <!-- No INTERNET: the app itself never opens a socket. The VPN sink, the
-         traffic counters (NetworkStatsManager/TrafficStats) and speed estimate
-         work without network access. -->
+    <!-- Used only while ad blocking is on, to forward ordinary DNS and refresh the list.
+         With the toggle off the process still opens no sockets. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- User grants usage access in Android Settings; needed only for per-app traffic. -->
@@ -26,7 +26,7 @@
             <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
             <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="true" />
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-controlled local firewall dropping traffic from unselected applications" />
+                android:value="User-controlled local firewall dropping traffic from unselected applications, with optional DNS ad blocking" />
         </service>
         <receiver android:name=".BootReceiver" android:exported="false">
             <intent-filter>

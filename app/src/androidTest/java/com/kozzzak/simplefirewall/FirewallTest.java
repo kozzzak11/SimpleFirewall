@@ -81,12 +81,14 @@ public class FirewallTest {
     }
 
     @Before public void prepare() throws Exception {
+        Rules.adblock(context, false);
         command("appops set " + context.getPackageName() + " ACTIVATE_VPN allow");
         screen = (MainActivity) instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         expectReachable();
     }
     @After public void cleanup() {
         context.getSystemService(ConnectivityManager.class).bindProcessToNetwork(null);
+        Rules.adblock(context, false);
         Rules.enabled(context, false);
         context.startService(new Intent(context, FirewallService.class).setAction(FirewallService.STOP));
         Rules.save(context, Collections.emptySet());
@@ -232,6 +234,78 @@ public class FirewallTest {
             assertTrue("NetworkStats query unavailable: " + data.error, data.networks > 0);
             assertTrue("Received probe bytes not attributed to its UID", data.byUid.containsKey(uid) && data.byUid.get(uid).rx > 0);
         } finally { command("appops set " + context.getPackageName() + " GET_USAGE_STATS deny"); }
+    }
+
+    @Test public void adBlockFiltersDnsWithoutDroppingAllowedTraffic() throws Exception {
+        command("settings put global private_dns_mode off");
+        long previous = FirewallService.appliedGeneration;
+        Rules.adblock(context, true); Rules.enabled(context, false);
+        instrumentation.runOnMainSync(() -> context.startForegroundService(new Intent(context, FirewallService.class).setAction(FirewallService.FILTER)));
+        long end = System.currentTimeMillis() + 6000;
+        while ((!FirewallService.running || FirewallService.appliedGeneration <= previous) && System.currentTimeMillis() < end)
+            Thread.sleep(50);
+        assertTrue(FirewallService.error, FirewallService.running);
+        boolean v4default = false, dnsRoute = false;
+        ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
+        for (Network network : cm.getAllNetworks()) {
+            LinkProperties props = cm.getLinkProperties(network);
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            if (props == null || caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
+            for (RouteInfo route : props.getRoutes()) {
+                if ("0.0.0.0/0".equals(route.getDestination().toString())) v4default = true;
+                if ("10.111.222.2/32".equals(route.getDestination().toString())) dnsRoute = true;
+            }
+        }
+        assertTrue("DNS-only mode must route the virtual resolver", dnsRoute);
+        assertFalse("DNS-only mode must not capture all traffic", v4default);
+        for (int i = 0; i < 5 && !connects(); i++) Thread.sleep(200);
+        assertTrue("Ordinary traffic must stay up while only ad blocking is on", connects());
+        String blocked = resolve("ads.doubleclick.net");
+        assertNotEquals("timeout", blocked);
+        assertNotEquals("Filter did not answer: " + blocked + " uidMisses=" + PacketTunnel.uidMisses + " " + PacketTunnel.lastError, "nx", blocked);
+        for (String address : blocked.split(",")) assertTrue(address, sinkAddress(address));
+
+        setRules(Collections.emptySet());
+        boolean full = false;
+        for (Network network : cm.getAllNetworks()) {
+            LinkProperties props = cm.getLinkProperties(network);
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            if (props == null || caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
+            for (RouteInfo route : props.getRoutes()) if ("0.0.0.0/0".equals(route.getDestination().toString())) full = true;
+        }
+        assertTrue("Firewall plus ad blocking still sinks blocked apps", full);
+        expectBlocked("Per-app block stopped working while ad blocking was on");
+        setRules(Collections.singleton(PROBE));
+        boolean allowedUp = false;
+        for (int i = 0; i < 5; i++) { if (connects()) { allowedUp = true; break; } Thread.sleep(200); }
+        assertTrue("Allowed app unreachable via relay: " + PacketTunnel.lastError + " uidMisses=" + PacketTunnel.uidMisses
+            + " forwarded=" + PacketTunnel.forwardedTcp, allowedUp);
+        String still = resolve("pagead2.googlesyndication.com");
+        assertNotEquals("nx", still);
+        for (String address : still.split(",")) assertTrue(address, sinkAddress(address));
+    }
+
+    private String resolve(String host) {
+        String request = java.util.UUID.randomUUID().toString();
+        CountDownLatch reply = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> address = new java.util.concurrent.atomic.AtomicReference<>("timeout");
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                if (request.equals(i.getStringExtra("request"))) { address.set(i.getStringExtra("address")); reply.countDown(); }
+            }
+        };
+        context.registerReceiver(receiver, new IntentFilter("com.kozzzak.simplefirewall.PROBE_RESULT"),
+            "com.kozzzak.simplefirewall.INTERNAL", null, Context.RECEIVER_EXPORTED);
+        try {
+            context.sendBroadcast(new Intent().setComponent(new ComponentName(PROBE, PROBE + ".ProbeReceiver"))
+                .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES).putExtra("request", request).putExtra("host", host));
+            if (!reply.await(8, TimeUnit.SECONDS)) return "timeout";
+            return address.get() == null ? "timeout" : address.get();
+        } catch (InterruptedException e) { throw new AssertionError(e); }
+        finally { context.unregisterReceiver(receiver); }
+    }
+    private static boolean sinkAddress(String address) {
+        return "0.0.0.0".equals(address) || "::".equals(address) || "0:0:0:0:0:0:0:0".equals(address);
     }
 
 }
