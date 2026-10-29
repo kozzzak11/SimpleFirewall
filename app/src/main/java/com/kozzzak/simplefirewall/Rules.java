@@ -34,6 +34,9 @@ final class Rules {
     }
     static boolean enabled(Context c) { return prefs(c).getBoolean("enabled", false); }
     static void enabled(Context c, boolean value) { prefs(c).edit().putBoolean("enabled", value).commit(); }
+    /** Optional DNS ad blocking. Off leaves the VPN behaviour of 1.3.0 unchanged. */
+    static boolean adblock(Context c) { return prefs(c).getBoolean("adblock", false); }
+    static void adblock(Context c, boolean value) { prefs(c).edit().putBoolean("adblock", value).commit(); }
     /** The user wants the firewall on, but Android or another VPN switched it off. */
     static boolean interrupted(Context c) { return prefs(c).getBoolean("interrupted", false); }
     static void interrupted(Context c, boolean value) { prefs(c).edit().putBoolean("interrupted", value).commit(); }

@@ -15,6 +15,8 @@ public class FirewallService extends VpnService {
     static final String UPDATE = "com.kozzzak.simplefirewall.UPDATE";
     static final String REPAIR = "com.kozzzak.simplefirewall.REPAIR";
     static final String STOP = "com.kozzzak.simplefirewall.STOP";
+    static final String STOP_VPN = "com.kozzzak.simplefirewall.STOP_VPN";
+    static final String FILTER = "com.kozzzak.simplefirewall.FILTER";
     static final String STATUS = "com.kozzzak.simplefirewall.STATUS";
     static final String ENABLE = "com.kozzzak.simplefirewall.ENABLE";
     private static final int ONGOING_ID = 1, OFF_ID = 2;
@@ -24,7 +26,11 @@ public class FirewallService extends VpnService {
     static volatile Set<String> appliedPackages = Collections.emptySet();
     static volatile long appliedGeneration;
     static volatile String error = "";
+    private static final int MODE_SINK = 0, MODE_FILTER = 1;
     private ParcelFileDescriptor tunnel;
+    private PacketTunnel engine;
+    private int tunnelMode = MODE_SINK;
+    private boolean filterFirewall;
     private boolean registered, networkRegistered;
     private final Handler handler = new Handler(android.os.Looper.getMainLooper());
     private Set<String> lastAllowed;
@@ -99,8 +105,16 @@ public class FirewallService extends VpnService {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
-        if (STOP.equals(action)) {
-            error = ""; Rules.interrupted(this, false); shutdown(true); return START_NOT_STICKY;
+        if (STOP_VPN.equals(action)) Rules.adblock(this, false);
+        if (STOP.equals(action) || STOP_VPN.equals(action)) {
+            error = ""; Rules.interrupted(this, false); Rules.enabled(this, false);
+            // Ad blocking keeps the same VPN up in DNS-only mode. With it off this is a full stop.
+            if (Rules.adblock(this)) {
+                try { startForeground(ONGOING_ID, notification()); }
+                catch (RuntimeException e) { /* background start refused */ }
+                establishRules(true); return START_STICKY;
+            }
+            shutdown(true); return START_NOT_STICKY;
         }
         // Every other command may come from startForegroundService(). Satisfy
         // the foreground contract first, before any exit path, or Android
@@ -108,22 +122,23 @@ public class FirewallService extends VpnService {
         try { startForeground(ONGOING_ID, notification()); }
         catch (RuntimeException e) { /* background start refused; the checks below still run */ }
         // A queued START after STOP must restore the latest requested state.
-        // UPDATE/REPAIR never turn on a firewall the user has switched off.
+        // UPDATE/REPAIR/FILTER never turn on a firewall the user has switched off.
         // Explicit START and the system's always-on start (android.net.VpnService).
-        boolean explicit = intent != null && !UPDATE.equals(action) && !REPAIR.equals(action);
+        boolean explicit = intent != null && !UPDATE.equals(action) && !REPAIR.equals(action) && !FILTER.equals(action);
         if (explicit) {
             Rules.enabled(this, true); Rules.interrupted(this, false);
             getSystemService(NotificationManager.class).cancel(OFF_ID);
         }
-        // START_STICKY restart (null intent): resume only if nothing else took the VPN.
-        if (!Rules.enabled(this) || (!explicit && Rules.interrupted(this) && !running)) {
+        // With ad blocking off the predicate below matches 1.3.0 exactly.
+        boolean ads = Rules.adblock(this);
+        if ((!Rules.enabled(this) && !ads) || (!ads && !explicit && Rules.interrupted(this) && !running)) {
             shutdown(false); return START_NOT_STICKY;
         }
         if (prepare(this) != null) {
             interrupt("Нет разрешения на VPN. Включите firewall ещё раз.");
             return START_NOT_STICKY;
         }
-        if (UPDATE.equals(action) && running) {
+        if ((UPDATE.equals(action) || FILTER.equals(action)) && running) {
             updating = true; changed();
             handler.removeCallbacks(updateRules); handler.postDelayed(updateRules, 250);
         } else establishRules(REPAIR.equals(action) || !running);
@@ -151,15 +166,19 @@ public class FirewallService extends VpnService {
 
     private Notification notification() {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
-        PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, FirewallService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE);
+        boolean ads = Rules.adblock(this), firewall = Rules.enabled(this);
+        PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, FirewallService.class).setAction(STOP_VPN), PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, "firewall")
-            .setSmallIcon(R.drawable.ic_shield).setContentTitle("Firewall включён")
-            .setContentText("Интернет только у выбранных приложений")
+            .setSmallIcon(R.drawable.ic_shield).setContentTitle(firewall || !ads ? "Firewall включён" : "Реклама блокируется")
+            .setContentText(!ads ? "Интернет только у выбранных приложений"
+                : firewall ? "Интернет только у выбранных приложений · реклама блокируется" : "Блокировка рекламы включена")
             .setContentIntent(open).setOngoing(true)
             .addAction(new Notification.Action.Builder(null, "Выключить", stop).build()).build();
     }
 
     private void establishRules(boolean force) {
+        if (Rules.adblock(this)) { establishAdblock(force); return; }
+        if (tunnelMode != MODE_SINK) force = true;
         if (!Rules.enabled(this)) return;
         Set<String> allowed = Rules.allowed(this);
         if (!force && tunnel != null && allowed.equals(lastAllowed)) {
@@ -198,7 +217,11 @@ public class FirewallService extends VpnService {
             ParcelFileDescriptor next = builder.establish();
             if (next == null) throw new IOException("VPN не запущен");
             ParcelFileDescriptor previous = tunnel;
+            PacketTunnel previousEngine = engine;
             tunnel = next;
+            engine = null;
+            tunnelMode = MODE_SINK;
+            if (previousEngine != null) previousEngine.stop();
             if (previous != null) try { previous.close(); } catch (IOException ignored) {}
             // Retain the TUN descriptor without forwarding or polling packets.
             // No remote endpoints, packet logging, wakelocks or userspace TCP stack.
@@ -218,6 +241,69 @@ public class FirewallService extends VpnService {
         }
     }
 
+    /**
+     * Ad blocking and, when the firewall is also on, per-app dropping share one VPN.
+     * Allowed apps are relayed only in that combined mode; with ad blocking off {@link #establishRules}
+     * keeps the 1.3.0 sink and never reads packets.
+     */
+    private void establishAdblock(boolean force) {
+        boolean firewall = Rules.enabled(this);
+        Set<String> allowed = Rules.allowed(this);
+        if (!force && tunnel != null && engine != null && tunnelMode == MODE_FILTER && firewall == filterFirewall) {
+            engine.allow(allowed);
+            lastAllowed = new HashSet<>(allowed);
+            appliedPackages = Collections.unmodifiableSet(new HashSet<>(allowed));
+            running = true; updating = false; error = "";
+            appliedGeneration++;
+            changed();
+            return;
+        }
+        updating = true; changed();
+        try {
+            Builder builder = new Builder().setSession("SimpleFirewall").setMtu(1500).setMetered(false).setBlocking(true)
+                .addAddress("10.111.0.1", 32).addAddress("fd42:7366::1", 128)
+                .addDnsServer("10.111.222.2").addDnsServer("fd42:7366::2")
+                .addRoute("10.111.222.2", 32).addRoute("fd42:7366::2", 128);
+            if (firewall) {
+                builder.addRoute("0.0.0.0", 0).addRoute("::", 0);
+            } else {
+                builder.allowFamily(android.system.OsConstants.AF_INET).allowFamily(android.system.OsConstants.AF_INET6);
+            }
+            builder.setUnderlyingNetworks(null);
+            builder.setConfigureIntent(PendingIntent.getActivity(this, 0,
+                new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE));
+            try { builder.addDisallowedApplication(getPackageName()); }
+            catch (PackageManager.NameNotFoundException ignored) { /* ourselves */ }
+            ParcelFileDescriptor next = builder.establish();
+            if (next == null) throw new IOException("VPN не запущен");
+            PacketTunnel nextEngine = new PacketTunnel(this, next, firewall);
+            nextEngine.allow(allowed);
+            nextEngine.start();
+            ParcelFileDescriptor previous = tunnel;
+            PacketTunnel previousEngine = engine;
+            tunnel = next;
+            engine = nextEngine;
+            tunnelMode = MODE_FILTER;
+            filterFirewall = firewall;
+            if (previousEngine != null) previousEngine.stop();
+            if (previous != null) try { previous.close(); } catch (IOException ignored) {}
+            lastAllowed = new HashSet<>(allowed);
+            appliedPackages = Collections.unmodifiableSet(new HashSet<>(allowed));
+            running = true; updating = false;
+            appliedGeneration++;
+            error = "";
+            try { startForeground(ONGOING_ID, notification()); } catch (RuntimeException ignored) {}
+            changed();
+        } catch (Exception e) {
+            updating = false;
+            if (tunnel != null) {
+                error = "Правила не обновлены. Выключите и включите firewall.";
+                changed();
+            } else interrupt(firewall ? "Не удалось включить firewall: " + e.getClass().getSimpleName()
+                : "Не удалось включить блокировку рекламы: " + e.getClass().getSimpleName());
+        }
+    }
+
     /** Blocking stopped against the user's wish: keep the intent, warn loudly. */
     private void interrupt(String message) {
         error = message;
@@ -226,6 +312,10 @@ public class FirewallService extends VpnService {
         shutdown(false);
     }
     private void closeTunnel() {
+        PacketTunnel dying = engine;
+        engine = null;
+        tunnelMode = MODE_SINK;
+        if (dying != null) dying.stop();
         if (tunnel != null) try { tunnel.close(); } catch (IOException ignored) {}
         tunnel = null;
         running = false; updating = false; lastAllowed = null; appliedPackages = Collections.emptySet();

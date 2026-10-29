@@ -1,0 +1,32 @@
+# Always merged, including after an in-app list update.
+# Yandex Mobile Ads, AppMetrica and Google ad SDKs, plus public DoH endpoints
+# that would otherwise bypass the filter. Ordinary sites are not listed.
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+google-analytics.com
+adservice.google.com
+app-measurement.com
+imasdk.googleapis.com
+yandexadexchange.net
+mobile.yandexadexchange.net
+an.yandex.ru
+yabs.yandex.ru
+adfox.ru
+adfox.yandex.ru
+bs.yandex.ru
+mc.yandex.ru
+appmetrica.yandex.net
+appmetrica.yandex.com
+appmetrica.yandex.ru
+report.appmetrica.yandex.net
+startup.mobile.yandex.net
+dns.google
+dns.google.com
+cloudflare-dns.com
+mozilla.cloudflare-dns.com
+chrome.cloudflare-dns.com
+dns.quad9.net
+doh.opendns.com
+dns.adguard-dns.com
+dns.nextdns.io
