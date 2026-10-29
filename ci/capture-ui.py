@@ -15,7 +15,29 @@ def hierarchy():
 def find(root, description):
     return next((n for n in root.iter('node') if n.get('content-desc') == description), None)
 
-def wait_for(description, timeout=20):
+def dismiss_anr(root):
+    labels = []
+    for n in root.iter('node'):
+        labels.append(n.get('text') or '')
+        labels.append(n.get('content-desc') or '')
+    blob = ' '.join(labels)
+    if "isn't responding" not in blob and 'не отвечает' not in blob:
+        return False
+    # Quickstep (the launcher) ANRs under uiautomator on the emulator and covers the app.
+    system = 'Quickstep' in blob or 'Launcher' in blob
+    order = ('Close app', 'Закрыть приложение', 'Wait', 'Подождать') if system else ('Wait', 'Подождать', 'Close app', 'Закрыть приложение')
+    for want in order:
+        node = next((n for n in root.iter('node') if n.get('text') == want or n.get('content-desc') == want), None)
+        if node is None or not node.get('bounds'):
+            continue
+        x1, y1, x2, y2 = map(int, re.findall(r'\d+', node.get('bounds')))
+        adb('shell', 'input', 'tap', str((x1 + x2) // 2), str((y1 + y2) // 2))
+        time.sleep(1)
+        adb('shell', 'am', 'start', '-n', 'com.kozzzak.simplefirewall/.MainActivity')
+        return True
+    return False
+
+def wait_for(description, timeout=40):
     deadline = time.time() + timeout
     root = None
     while time.time() < deadline:
@@ -27,6 +49,7 @@ def wait_for(description, timeout=20):
         node = find(root, description)
         if node is not None:
             return root, node
+        dismiss_anr(root)
         time.sleep(1)
     shown = []
     if root is not None:
